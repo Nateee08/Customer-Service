@@ -3,7 +3,7 @@ import json, os, threading, time
 import requests
 from sqlalchemy import Table, Column, String, Text, Integer, select, insert, update
 
-RECIPIENTS = ['roger@hookedonsolar.com', 'alec@hookedonsolar.com', 'customerservice@hookedonsolar.com']
+RECIPIENTS = ['alec@hookedonsolar.com', 'customerservice@hookedonsolar.com']
 _lock = threading.Lock()
 
 def define_table(meta):
@@ -38,7 +38,7 @@ def deliver_pending(engine, table, logger):
             try:
                 response = requests.post('https://api.resend.com/emails',
                     headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': row['id']},
-                    json={'from': sender, 'to': json.loads(row['recipients']),
+                    json={'from': sender, 'to': [email for email in json.loads(row['recipients']) if email in RECIPIENTS],
                           'subject': row['subject'], 'text': row['body'], 'reply_to': row['reply_to']}, timeout=15)
                 response.raise_for_status()
                 provider_id = response.json()['id']
