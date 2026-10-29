@@ -41,8 +41,13 @@ Included: customer login, private tickets and attachments, queue/status display,
 Before customer launch, connect and verify persistent storage, Smartsheet columns and permissions, email reset delivery, staff access, and actual queue changes. Test two real customer accounts for isolation. Current automated tests cover signup, logout, CSRF, user-scoped tickets/files/reviews, staff access denial, documents and health. Run `python -m unittest test_app -v`.
 
 ## Staff email notifications
-New service requests and customer feedback are queued transactionally in `care_email_outbox` for Alec and Customer Service. Password-reset messages remain customer-only. No historical submissions are emailed automatically.
+Customer feedback is queued transactionally in `care_email_outbox` for Alec and Customer Service. Password-reset messages remain customer-only. No historical submissions are emailed automatically. Service requests go to Smartsheet, not the email queue. Contact and complaint email links address Customer Service only.
 
 Delivery requires `RESEND_API_KEY` and `NOTIFICATION_FROM` (a verified sending address) in the customer service Render environment. Until these are configured, submissions remain saved and emails remain pending. The worker sends over HTTPS every 60 seconds while the service is running; a sleeping free service cannot deliver until it wakes. Replies go to the submitting customer's email address. Attachments stay with the Smartsheet request and are not duplicated into notification emails.
 
 Transient failures retry with the same provider idempotency key. Uncertain deliveries older than 23 hours are held as `needs_review` to avoid retries after the provider's idempotency window. A provider acceptance is not proof of inbox delivery; confirm using the provider's delivery records. Keep a single application worker unless a database-backed claim mechanism is added.
+
+### Company Gmail sender (preferred)
+Authorize **customerservice@hookedonsolar.com** using a company-owned Google Cloud OAuth client with Gmail API enabled and only `https://www.googleapis.com/auth/gmail.send` scope. Request offline access and store `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, and `GOOGLE_REFRESH_TOKEN` securely in the customer service Render service, never in GitHub. Use an internal Workspace OAuth app where available; a testing-mode external app is unsuitable for permanent unattended sending. This route takes precedence over Resend when all three settings exist.
+
+The Google worker sends feedback only to Alec and Customer Service. It does not read inboxes or forward password reset links. Gmail has no send idempotency key: ambiguous send failures are held for review (`needs_review`), and a process interrupted during a send leaves `sending` for review. Do not reset these states without checking the mailbox's Sent folder. No live email delivery has been verified until the mailbox authorization is installed and an end-to-end test succeeds.

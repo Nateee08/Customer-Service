@@ -259,8 +259,6 @@ def save_ticket():
  with engine.begin() as c:
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
-  body='Ticket: '+tid+'\nEmail: '+u['email']+'\n'+'\n'.join(k+': '+d[k] for k in fields)+'\nAttachments: '+str(len(stored))+' (available with the Smartsheet intake request)'
-  notifications.enqueue(c,email_outbox,'ticket-'+tid,'New service request | '+tid,body,u['email'])
  synced=sync_ticket(tid)
  return {'id':tid,'message':'Ticket submitted to the service intake team.' if synced else 'Request saved securely. Intake delivery is pending; your request has not been confirmed in the queue.'}
 @app.get('/api/file')
@@ -311,6 +309,6 @@ def retry_pending_intake():
   time.sleep(60)
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
-if os.getenv('RENDER') and os.getenv('RESEND_API_KEY') and os.getenv('NOTIFICATION_FROM'):
+if os.getenv('RENDER') and notifications.configured():
  threading.Thread(target=notifications.run_worker,args=(engine,email_outbox,app.logger),name='staff-email',daemon=True).start()
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))
