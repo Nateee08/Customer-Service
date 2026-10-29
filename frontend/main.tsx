@@ -1,0 +1,1 @@
+import React from 'react';import {createRoot} from 'react-dom/client';import Portal from './portal';import './styles.css';fetch('/api/me').then(r=>r.json()).then(v=>createRoot(document.getElementById('root')!).render(<Portal user={v.user}/>)).catch(()=>createRoot(document.getElementById('root')!).render(<Portal user={null}/>));

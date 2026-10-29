@@ -1,0 +1,1 @@
+import {build} from 'esbuild';await build({entryPoints:['frontend/main.tsx'],bundle:true,minify:true,outdir:'static',entryNames:'portal',jsx:'automatic',loader:{'.css':'css'},target:['es2020']});
