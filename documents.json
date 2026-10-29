@@ -1,1 +1,6 @@
-{}
+{
+  "service-protocol.pdf": "pdf-data/service-protocol.b64",
+  "workmanship-warranty.pdf": "pdf-data/workmanship-warranty.b64",
+  "subscription-plan.pdf": "pdf-data/subscription-plan.b64",
+  "quality-assurance.pdf": "pdf-data/quality-assurance.b64"
+}

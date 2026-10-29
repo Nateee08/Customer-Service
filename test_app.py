@@ -19,7 +19,12 @@ class PortalTests(unittest.TestCase):
   self.assertEqual(self.a.get('/logout').status_code,302);self.assertEqual(self.a.get('/api/portal').status_code,401)
  def test_public_pages_and_documents(self):
   self.assertEqual(self.a.get('/').status_code,200)
-  for name in care.DOCS:self.assertEqual(self.a.get('/documents/'+name).status_code,200)
+  for name in care.DOCS:
+   response=self.a.get('/documents/'+name)
+   self.assertEqual(response.status_code,200)
+   self.assertEqual(response.mimetype,'application/pdf')
+   self.assertTrue(response.data.startswith(b'%PDF-'))
+   self.assertIn('attachment',self.a.get('/documents/'+name+'?download=1').headers['Content-Disposition'])
   self.assertEqual(self.a.get('/api/portal').status_code,401)
   self.assertEqual(self.a.get('/healthz').json['status'],'ok')
  def test_auth_csrf(self):

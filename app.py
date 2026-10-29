@@ -73,7 +73,8 @@ def me():
 @app.get('/documents/<name>')
 def document(name):
  if name not in DOCS:abort(404)
- return send_file(io.BytesIO(base64.b64decode(DOCS[name])),mimetype='image/jpeg',download_name=name)
+ with open(os.path.join(os.path.dirname(__file__),DOCS[name])) as f:data=base64.b64decode(f.read())
+ return send_file(io.BytesIO(data),mimetype='application/pdf',download_name=name,as_attachment=request.args.get('download')=='1')
 def rate(key,max_count=10):
  bucket=str(int(time.time())//900);key=digest(key+bucket)
  with engine.begin() as c:
