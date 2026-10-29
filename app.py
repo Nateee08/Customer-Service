@@ -158,7 +158,7 @@ def smartsheet_config():
   if time.time()<_intake_retry_at:return None
   try:
    explicit=json.loads(os.getenv('SMARTSHEET_COLUMNS','{}'))
-   if explicit and all(explicit.get(k) for k in ('ticket','email','subject','description','status','queue')):
+   if explicit and all(explicit.get(k) for k in ('ticket','email','subject','description','status')):
     _intake_columns=explicit;return token,sheet,explicit
    base='https://api.smartsheet.com/2.0/sheets/'+sheet
    headers={'Authorization':'Bearer '+token}
@@ -167,7 +167,7 @@ def smartsheet_config():
    mapping={'first_name':'First Name','last_name':'Last Name','email':'Email','phone':'Phone #','address':'Address','description':'Notes:','status':'Status','date_realized':'Date Realized'}
    missing=[title for title in mapping.values() if title.casefold() not in by_title]
    if missing:raise ValueError('Required intake columns missing: '+', '.join(missing))
-   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject'),('queue','Website Queue Position')]:
+   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject')]:
     if title.casefold() not in by_title:
      r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
      added=r.json()['result'];columns.extend(added)
@@ -194,12 +194,11 @@ def portal():
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
   for t in ts:
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
-   t['queue']=None
+   t.pop('queue',None)
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
-    vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']));q=vals.get(str(cfg[2]['queue']))
+    vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
     if status:t['status']=str(status)
-    if isinstance(q,(float,int)) and q>0:t['queue']=int(q)
  return jsonify(tickets=ts,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected)
 def sync_ticket(tid):
  with _intake_lock:return _sync_ticket(tid)
@@ -260,7 +259,7 @@ def save_ticket():
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
  synced=sync_ticket(tid)
- return {'id':tid,'message':'Ticket submitted to the service intake team.' if synced else 'Request saved securely. Intake delivery is pending; your request has not been confirmed in the queue.'}
+ return {'id':tid,'message':'Ticket submitted to the service intake team.' if synced else 'Request saved securely. Delivery to the service intake team is pending.'}
 @app.get('/api/file')
 def file_download():
  u=required()

@@ -20,9 +20,9 @@ The share-link identifier is not treated as the numeric API sheet ID.
 Configure runtime secrets, never commit values:
 - SMARTSHEET_TOKEN
 - SMARTSHEET_SHEET_ID (numeric API ID)
-- SMARTSHEET_COLUMNS (JSON mapping `ticket`, `name`, `email`, `phone`, `address`, `category`, `subject`, `description`, `created`, `status`, `queue` to actual column IDs)
+- SMARTSHEET_COLUMNS (JSON mapping `ticket`, `name`, `email`, `phone`, `address`, `category`, `subject`, `description`, `created`, `status` to actual column IDs)
 
-Ticket, email, name, subject, description, status and queue mappings are required before connection is considered configured. Intake fields are sent server-side and attachments are copied to the ticket row. Refreshing tickets reads status and queue from Smartsheet. Staff assign the actual intake queue order considering urgency and membership priority. Customer views never return other customers' rows. No invented queue number is shown while disconnected.
+Smartsheet columns are discovered by title unless an explicit mapping is supplied. Intake fields are sent server-side and attachments are copied to the ticket row. Refreshing tickets reads status from Smartsheet. Customer views never return other customers' rows. Queue positions and place-in-line messaging have been removed; legacy database and sheet columns are retained without being used.
 
 Use the staff reconciliation action for pending deliveries. It checks for the unique ticket number before creating a row. Avoid concurrent reconciliation of the same ticket. Reconcile attachment transfers after uncertain failures before retrying to avoid duplicate attachments.
 
@@ -36,9 +36,9 @@ For password reset, set SMTP_HOST, SMTP_PORT (587 default), SMTP_USER, SMTP_PASS
 ## Content and release checks
 Original uploaded documents are encoded in documents.json and served at /documents/*.jpg. Branding uses the original logo from the subscription document. Website colors are white, black and orange. Warranty tracking begins on work completion; the original photographed warranty still says installation and should be replaced with an approved updated copy. Confirm the 60-day introductory offer dates before launch.
 
-Included: customer login, private tickets and attachments, queue/status display, Basic/Gold information, customer QA feedback, staff profile editing, FAQs, learning guides, and official Tesla/SunStrong links. No billing or scheduling integration. Learning content is introductory; no live classes, AI chat, or video library is implied.
+Included: customer login, private tickets and attachments, request status display, Basic/Gold information, customer QA feedback, staff profile editing, FAQs, learning guides, and official Tesla/SunStrong links. No billing or scheduling integration. Learning content is introductory; no live classes, AI chat, or video library is implied.
 
-Before customer launch, connect and verify persistent storage, Smartsheet columns and permissions, email reset delivery, staff access, and actual queue changes. Test two real customer accounts for isolation. Current automated tests cover signup, logout, CSRF, user-scoped tickets/files/reviews, staff access denial, documents and health. Run `python -m unittest test_app -v`.
+Before customer launch, connect and verify persistent storage, Smartsheet columns and permissions, email reset delivery, staff access, and status updates. Test two real customer accounts for isolation. Current automated tests cover signup, logout, CSRF, user-scoped tickets/files/reviews, staff access denial, documents and health. Run `python -m unittest test_app -v`.
 
 ## Staff email notifications
 Customer feedback is queued transactionally in `care_email_outbox` for Alec and Customer Service. Password-reset messages remain customer-only. No historical submissions are emailed automatically. Service requests go to Smartsheet, not the email queue. Contact and complaint email links address Customer Service only.

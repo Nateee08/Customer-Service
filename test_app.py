@@ -10,7 +10,7 @@ class PortalTests(unittest.TestCase):
   self.assertEqual(self.a.get('/api/me').json['user']['email'],'one@test.invalid')
   data={'name':'Test','phone':'5550000000','address':'Test address','category':'Solar','subject':'Isolation test','description':'Test only','ack':'on','photos':(io.BytesIO(b'%PDF-1.7\nfixture'),'test.pdf')}
   r=self.a.post('/api/portal',data=data,headers={'Origin':'http://localhost'});self.assertEqual(r.status_code,200)
-  rows=self.a.get('/api/portal').json['tickets'];self.assertEqual(len(rows),1);self.assertIsNone(rows[0]['queue'])
+  rows=self.a.get('/api/portal').json['tickets'];self.assertEqual(len(rows),1);self.assertNotIn('queue',rows[0])
   key=rows[0]['files'][0]['key'];self.assertEqual(self.a.get('/api/file?key='+key).status_code,200);self.assertEqual(self.b.get('/api/file?key='+key).status_code,404)
   self.assertEqual(self.b.get('/api/portal').json['tickets'],[])
   self.assertEqual(self.a.get('/staff').status_code,403)
