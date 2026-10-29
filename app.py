@@ -7,9 +7,11 @@ from werkzeug.security import generate_password_hash,check_password_hash
 from sqlalchemy import create_engine,MetaData,Table,Column,String,Integer,Text,LargeBinary,select,insert,update,delete,and_,func
 from sqlalchemy.exc import IntegrityError
 import requests
+import notifications
 app=Flask(__name__)
 app.config['MAX_CONTENT_LENGTH']=22*1024*1024
 meta=MetaData()
+email_outbox=notifications.define_table(meta)
 users=Table('care_users',meta,Column('id',String,primary_key=True),Column('email',String,unique=True,nullable=False),Column('name',String,nullable=False),Column('password',Text,nullable=False),Column('admin',Integer,nullable=False,default=0),Column('plan',String,nullable=False,default='None'),Column('membership_start',String),Column('membership_end',String),Column('minutes_used',Integer,nullable=False,default=0),Column('completion_date',String))
 sessions=Table('care_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
@@ -238,7 +240,10 @@ def save_ticket():
    if not t:abort(400,description='Select one of your tickets.')
    data=json.dumps(f.to_dict())
    if len(data)>10000:abort(400,description='Please shorten your notes.')
-   c.execute(insert(reviews).values(id=secrets.token_hex(16),user_id=u['id'],ticket_id=t.id,data=data,created=now()))
+   review_id=secrets.token_hex(16)
+   c.execute(insert(reviews).values(id=review_id,user_id=u['id'],ticket_id=t.id,data=data,created=now()))
+   feedback='\n'.join(k+': '+f.get(k,'') for k in ('serviceDate','Service technician','Service department','notes','customerName'))
+   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
   return {'message':'Your feedback has been saved.'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
  if any(not d[k] or len(d[k])>(5000 if k=='description' else 300) for k in fields):abort(400,description='Please complete all fields and keep the description under 5,000 characters.')
@@ -254,6 +259,8 @@ def save_ticket():
  with engine.begin() as c:
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
+  body='Ticket: '+tid+'\nEmail: '+u['email']+'\n'+'\n'.join(k+': '+d[k] for k in fields)+'\nAttachments: '+str(len(stored))+' (available with the Smartsheet intake request)'
+  notifications.enqueue(c,email_outbox,'ticket-'+tid,'New service request | '+tid,body,u['email'])
  synced=sync_ticket(tid)
  return {'id':tid,'message':'Ticket submitted to the service intake team.' if synced else 'Request saved securely. Intake delivery is pending; your request has not been confirmed in the queue.'}
 @app.get('/api/file')
@@ -304,4 +311,6 @@ def retry_pending_intake():
   time.sleep(60)
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
+if os.getenv('RENDER') and os.getenv('RESEND_API_KEY') and os.getenv('NOTIFICATION_FROM'):
+ threading.Thread(target=notifications.run_worker,args=(engine,email_outbox,app.logger),name='staff-email',daemon=True).start()
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))

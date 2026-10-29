@@ -39,3 +39,10 @@ Original uploaded documents are encoded in documents.json and served at /documen
 Included: customer login, private tickets and attachments, queue/status display, Basic/Gold information, customer QA feedback, staff profile editing, FAQs, learning guides, and official Tesla/SunStrong links. No billing or scheduling integration. Learning content is introductory; no live classes, AI chat, or video library is implied.
 
 Before customer launch, connect and verify persistent storage, Smartsheet columns and permissions, email reset delivery, staff access, and actual queue changes. Test two real customer accounts for isolation. Current automated tests cover signup, logout, CSRF, user-scoped tickets/files/reviews, staff access denial, documents and health. Run `python -m unittest test_app -v`.
+
+## Staff email notifications
+New service requests and customer feedback are queued transactionally in `care_email_outbox` for Roger, Alec, and Customer Service. Password-reset messages remain customer-only. No historical submissions are emailed automatically.
+
+Delivery requires `RESEND_API_KEY` and `NOTIFICATION_FROM` (a verified sending address) in the customer service Render environment. Until these are configured, submissions remain saved and emails remain pending. The worker sends over HTTPS every 60 seconds while the service is running; a sleeping free service cannot deliver until it wakes. Replies go to the submitting customer's email address. Attachments stay with the Smartsheet request and are not duplicated into notification emails.
+
+Transient failures retry with the same provider idempotency key. Uncertain deliveries older than 23 hours are held as `needs_review` to avoid retries after the provider's idempotency window. A provider acceptance is not proof of inbox delivery; confirm using the provider's delivery records. Keep a single application worker unless a database-backed claim mechanism is added.
