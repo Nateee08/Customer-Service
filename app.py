@@ -1,4 +1,5 @@
-import os,json,base64,secrets,hashlib,time,datetime,smtplib,io,re
+import os,json,base64,secrets,hashlib,time,datetime,smtplib,io,re,threading
+from zoneinfo import ZoneInfo
 from email.message import EmailMessage
 from urllib.parse import urlsplit
 from flask import Flask,request,jsonify,render_template,redirect,make_response,send_file,abort
@@ -143,12 +144,40 @@ def reset(token):
   if not 12<=len(password)<=128:return auth_view('reset','Use 12–128 characters.',400)
   c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']))
  return redirect('/login')
+_intake_lock=threading.RLock()
+_intake_columns=None
+_intake_retry_at=0
 def smartsheet_config():
- try:
-  token=os.getenv('SMARTSHEET_TOKEN');sheet=os.getenv('SMARTSHEET_SHEET_ID');cols=json.loads(os.getenv('SMARTSHEET_COLUMNS','{}'))
-  if token and sheet and all(cols.get(k) for k in ('ticket','email','name','subject','description','status','queue')):return token,sheet,cols
- except ValueError:pass
- return None
+ global _intake_columns,_intake_retry_at
+ token=os.getenv('SMARTSHEET_TOKEN');sheet=os.getenv('SMARTSHEET_SHEET_ID')
+ if not token or not sheet:return None
+ with _intake_lock:
+  if _intake_columns:return token,sheet,_intake_columns
+  if time.time()<_intake_retry_at:return None
+  try:
+   explicit=json.loads(os.getenv('SMARTSHEET_COLUMNS','{}'))
+   if explicit and all(explicit.get(k) for k in ('ticket','email','subject','description','status','queue')):
+    _intake_columns=explicit;return token,sheet,explicit
+   base='https://api.smartsheet.com/2.0/sheets/'+sheet
+   headers={'Authorization':'Bearer '+token}
+   r=requests.get(base+'/columns',headers=headers,timeout=15);r.raise_for_status()
+   columns=r.json()['data'];by_title={c['title'].strip().casefold():c for c in columns}
+   mapping={'first_name':'First Name','last_name':'Last Name','email':'Email','phone':'Phone #','address':'Address','description':'Notes:','status':'Status','date_realized':'Date Realized'}
+   missing=[title for title in mapping.values() if title.casefold() not in by_title]
+   if missing:raise ValueError('Required intake columns missing: '+', '.join(missing))
+   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject'),('queue','Website Queue Position')]:
+    if title.casefold() not in by_title:
+     r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
+     added=r.json()['result'];columns.extend(added)
+     by_title.update({c['title'].strip().casefold():c for c in added})
+    mapping[key]=title
+   _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
+   app.logger.warning('Smartsheet intake column mapping ready')
+   return token,sheet,_intake_columns
+  except (requests.RequestException,ValueError,KeyError):
+   _intake_retry_at=time.time()+60
+   app.logger.warning('Smartsheet intake setup failed; will retry. Check API access and required column titles.')
+   return None
 
 def smart_request(method,path,**kwargs):
  cfg=smartsheet_config();return requests.request(method,'https://api.smartsheet.com/2.0/sheets/'+cfg[1]+path,headers={'Authorization':'Bearer '+cfg[0],**kwargs.pop('headers',{})},timeout=15,**kwargs)
@@ -171,6 +200,8 @@ def portal():
     if isinstance(q,(float,int)) and q>0:t['queue']=int(q)
  return jsonify(tickets=ts,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected)
 def sync_ticket(tid):
+ with _intake_lock:return _sync_ticket(tid)
+def _sync_ticket(tid):
  cfg=smartsheet_config()
  if not cfg:return False
  with engine.connect() as c:t=dict(c.execute(select(tickets).where(tickets.c.id==tid)).mappings().one())
@@ -182,17 +213,21 @@ def sync_ticket(tid):
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
-    vals={**t,'ticket':tid,'status':'New'};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
+    parts=t['name'].strip().split(maxsplit=1)
+    vals={**t,'ticket':tid,'status':'000 - Intake','first_name':parts[0],'last_name':parts[1] if len(parts)>1 else '', 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystem: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
-   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='New'))
+   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
   with engine.connect() as c:fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
   for f in fs:
    r=smart_request('POST','/rows/'+row+'/attachments',data=f['data'],headers={'Content-Type':f['type'],'Content-Disposition':'attachment; filename="'+re.sub('[^a-zA-Z0-9._-]','_',f['name'])+'"'});r.raise_for_status()
    with engine.begin() as c:c.execute(update(files).where(files.c.id==f['id']).values(synced=1))
+  app.logger.warning('Smartsheet delivery confirmed for ticket %s',tid)
   return True
- except (requests.RequestException,ValueError,KeyError,IndexError):
+ except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
+  response=getattr(exc,'response',None)
+  app.logger.warning('Smartsheet delivery pending for ticket %s; HTTP status %s',tid,getattr(response,'status_code','unavailable'))
   if row:
-   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(status='New • attachments awaiting transfer'))
+   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(status='000 - Intake • attachments awaiting transfer'))
   return False
 @app.post('/api/portal')
 def save_ticket():
@@ -256,4 +291,17 @@ def create_admin():
   if u:c.execute(update(users).where(users.c.id==u.id).values(admin=1,password=generate_password_hash(password)));c.execute(delete(sessions).where(sessions.c.user_id==u.id))
   else:c.execute(insert(users).values(id=secrets.token_hex(16),email=email,name='Service team',password=generate_password_hash(password),admin=1,plan='None',minutes_used=0))
  click.echo('Staff account configured.')
+def retry_pending_intake():
+ while True:
+  try:
+   if engine and smartsheet_config():
+    with engine.connect() as c:
+     pending=set(c.execute(select(tickets.c.id).where(tickets.c.row_id.is_(None))).scalars())
+     pending.update(c.execute(select(files.c.ticket_id).where(files.c.synced==0)).scalars())
+    for tid in sorted(pending):sync_ticket(tid)
+  except Exception:
+   app.logger.warning('Intake retry deferred; requests remain saved')
+  time.sleep(60)
+if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
+ threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))
