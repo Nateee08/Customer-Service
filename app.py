@@ -16,6 +16,7 @@ email_outbox=notifications.define_table(meta)
 users=Table('care_users',meta,Column('id',String,primary_key=True),Column('email',String,unique=True,nullable=False),Column('name',String,nullable=False),Column('password',Text,nullable=False),Column('admin',Integer,nullable=False,default=0),Column('plan',String,nullable=False,default='None'),Column('membership_start',String),Column('membership_end',String),Column('minutes_used',Integer,nullable=False,default=0),Column('completion_date',String))
 sessions=Table('care_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
+closures=Table('care_ticket_closures',meta,Column('ticket_id',String,primary_key=True),Column('closed_at',Integer,nullable=False))
 files=Table('care_files',meta,Column('id',String,primary_key=True),Column('ticket_id',String,nullable=False),Column('user_id',String,nullable=False),Column('name',String),Column('type',String),Column('data',LargeBinary),Column('synced',Integer,default=0))
 reviews=Table('care_reviews',meta,Column('id',String,primary_key=True),Column('ticket_id',String),Column('user_id',String),Column('data',Text),Column('created',String))
 resets=Table('care_resets',meta,Column('token',String,primary_key=True),Column('user_id',String),Column('expires',Integer))
@@ -221,7 +222,18 @@ def portal():
     # Only a successful, complete sheet read can establish that a synced row was deleted.
     t['status']='Deleted from Smartsheet'
     c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
-   if 'closed' in (t['status'] or '').casefold() or re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()) or t['status']=='Deleted from Smartsheet':continue
+   if t['status']=='Deleted from Smartsheet':continue
+   closed='closed' in (t['status'] or '').casefold() or bool(re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()))
+   if closed:
+    closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
+    if closed_at is None:
+     closed_at=int(time.time())
+     c.execute(insert(closures).values(ticket_id=t['id'],closed_at=closed_at))
+    expires=closed_at+3*24*60*60
+    if time.time()>=expires:continue
+    t['feedbackUntil']=datetime.datetime.fromtimestamp(expires,datetime.timezone.utc).isoformat()
+   elif connected and row:
+    c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active]
