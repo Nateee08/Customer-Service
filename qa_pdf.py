@@ -5,6 +5,7 @@ from functools import lru_cache
 from reportlab.pdfgen import canvas
 from reportlab.lib.colors import Color
 from pypdf import PdfReader,PdfWriter
+from pypdf.generic import NameObject
 ROOT=Path(__file__).parent
 FIELDS=json.loads((ROOT/'qa-fields.json').read_text())
 
@@ -26,12 +27,25 @@ def template():
 
 def completed(values):
  writer=PdfWriter();writer.clone_document_from_reader(PdfReader(io.BytesIO(template())))
- clean={}
+ clean={};scores={}
  for f in FIELDS:
   value=str(values.get(f['name'],'')).strip()
   if f['kind']=='checkbox':value='/Yes' if value in ('Yes','on','true') else '/Off'
   elif f['kind']=='radio':
-   value='/'+value if value in ('Exceeds','Meets','Could do better') else '/Off'
+   scores[f['name']]=NameObject('/'+value if value in ('Exceeds','Meets','Could do better') else '/Off')
+   continue
   clean[f['name']]=value
  writer.update_page_form_field_values(None,clean,auto_regenerate=False)
+ # A radio group's value must be a PDF name on its parent field. Generic form
+ # filling can write a text string and conflicting /V values on the children;
+ # some viewers then show every option unchecked despite the saved selection.
+ for ref in writer.root_object['/AcroForm']['/Fields']:
+  field=ref.get_object()
+  if field.get('/T') not in scores:continue
+  selected=scores[field['/T']]
+  field[NameObject('/V')]=selected
+  for child in field['/Kids']:
+   widget=child.get_object()
+   widget[NameObject('/AS')]=selected if selected in widget['/AP']['/N'] else NameObject('/Off')
+   widget.pop(NameObject('/V'),None)  # Inherit the single canonical group value.
  out=io.BytesIO();writer.write(out);return out.getvalue()

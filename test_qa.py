@@ -26,6 +26,13 @@ class QaWorkflowTests(unittest.TestCase):
   with care.engine.connect() as c:
    row=c.execute(care.select(care.email_outbox).where(care.email_outbox.c.subject=='Customer feedback - QA Test - '+tid)).mappings().one()
    self.assertIn('alec@hookedonsolar.com',row['recipients']);self.assertIn('customerservice@hookedonsolar.com',row['recipients']);self.assertIn('qa_pdf',row['body'])
+   import base64,io,json
+   from pypdf import PdfReader
+   from test_qa_pdf import QaPdfTests
+   attachment=PdfReader(io.BytesIO(base64.b64decode(json.loads(row['body'])['pdf'])))
+   checks=QaPdfTests()
+   checks.assert_score(attachment,'Service technician','Meets')
+   checks.assert_score(attachment,'Service department','Exceeds')
   with care.engine.begin() as c:c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-259201))
   self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,400)
 
