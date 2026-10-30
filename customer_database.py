@@ -1,4 +1,4 @@
-"""Private, read-only client database matching. Never returns unverified records."""
+"""Read-only client matching, with separate customer and internal-intake policies."""
 import os, re, threading, time
 import requests
 
@@ -95,3 +95,89 @@ def related_job_numbers(sheet, verified_email, customer_name, address):
         if norm(intake_address(record))!=norm(address):continue
         if record.get('job_number'):jobs.add(record['job_number'])
     return sorted(jobs)
+
+
+def _street(value):
+    words = re.findall(r'[a-z0-9]+', str(value).casefold())
+    aliases = {'street':'st', 'avenue':'ave', 'boulevard':'blvd', 'circle':'cir',
+               'court':'ct', 'drive':'dr', 'lane':'ln', 'road':'rd', 'place':'pl',
+               'terrace':'ter', 'highway':'hwy', 'parkway':'pkwy',
+               'north':'n', 'south':'s', 'east':'e', 'west':'w',
+               'apartment':'unit', 'apt':'unit', 'suite':'unit', 'ste':'unit'}
+    return ' '.join(aliases.get(word, word) for word in words)
+
+
+def _same_property(record, submitted_address):
+    """Compare the full street/unit and locality, allowing standard street abbreviations."""
+    lines = [line.strip() for line in str(submitted_address).splitlines() if line.strip()]
+    if len(lines) < 2 or not record.get('address'):
+        return False
+    street = ' '.join(lines[:-1])
+    expected = ' '.join(filter(None, [record.get('address'), record.get('address2')]))
+    if _street(street) != _street(expected):
+        return False
+    locality = lines[-1]
+    city = locality.split(',')[0].strip()
+    if record.get('city') and norm(city) != norm(record['city']):
+        return False
+    zip_match = re.search(r'\b(\d{5})(?:-\d{4})?\b', locality)
+    if record.get('postal') and zip_match and record['postal'][:5] != zip_match.group(1):
+        return False
+    state_match = re.search(r',\s*([A-Za-z]{2})\b', locality)
+    if record.get('state') and state_match and norm(record['state']) != norm(state_match.group(1)):
+        return False
+    return bool(record.get('city') or (record.get('postal') and zip_match))
+
+
+def intake_lookup(sheet, *, email, name, telephone, address, job_number=''):
+    """Internal staff intake enrichment only. Never use for a customer lookup response.
+
+    Exact email, phone, full-name, job or property matches can identify a record.
+    Other matching details break ties; a first name alone is never sufficient.
+    Multiple jobs for one person/property remain explicit references. This does
+    not grant account access, and the public match() stays email-bound.
+    """
+    candidates = []
+    submitted_name = norm(name)
+    submitted_phone = phone(telephone)
+    requested_job = norm(job_number) if job_number else ''
+    for record in records(sheet):
+        if requested_job and norm(record.get('job_number', '')) != requested_job:
+            continue
+        full_name = norm(record.get('name', ''))
+        first_name = norm(record.get('first_name', ''))
+        full_name_match = bool(submitted_name and len(name.split()) >= 2 and submitted_name == full_name)
+        first_name_match = bool(submitted_name and submitted_name == first_name)
+        phone_match = len(submitted_phone) == 10 and submitted_phone == phone(record.get('phone', ''))
+        email_match = bool(email and email.casefold() in emails(record.get('email', '')))
+        address_match = _same_property(record, address)
+        score = sum((full_name_match, phone_match, email_match, address_match, bool(requested_job)))
+        if score:
+            candidates.append((record, (score, int(first_name_match))))
+    if not candidates:
+        return {'record': None, 'job_numbers': []}
+    strongest = max(score for _, score in candidates)
+    leaders = [r for r, score in candidates if score == strongest]
+    def identity(record):
+        return (norm(record.get('name', '')),
+                _street(' '.join(filter(None, [record.get('address'), record.get('address2')]))),
+                norm(record.get('city', '')), record.get('postal', '')[:5])
+    identities = {identity(r) for r in leaders}
+    if len(identities) != 1:
+        return {'record': None, 'job_numbers': []}
+    chosen = next(iter(identities))
+    if not chosen[0]:
+        return {'record': None, 'job_numbers': []}
+    # Include all exact customer/property job references, even when an older
+    # duplicate client row has a different or missing email/phone value.
+    candidates = [r for r in records(sheet) if identity(r) == chosen and
+                  (not requested_job or norm(r.get('job_number', '')) == requested_job)]
+    # Duplicate client rows are harmless; conflicting name fields are not guessed.
+    result = {}
+    for key in ('name', 'first_name', 'last_name'):
+        values = {r.get(key, '').strip() for r in candidates if r.get(key, '').strip()}
+        if len({norm(v) for v in values}) > 1:
+            return {'record': None, 'job_numbers': []}
+        result[key] = sorted(values)[0] if values else ''
+    jobs = sorted({r['job_number'] for r in candidates if r.get('job_number')})
+    return {'record': result, 'job_numbers': jobs}

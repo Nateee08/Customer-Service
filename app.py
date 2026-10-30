@@ -182,8 +182,6 @@ def smartsheet_config():
   if time.time()<_intake_retry_at:return None
   try:
    explicit=json.loads(os.getenv('SMARTSHEET_COLUMNS','{}'))
-   if explicit and all(explicit.get(k) for k in ('ticket','email','subject','description','status')):
-    _intake_columns=explicit;return token,sheet,explicit
    base='https://api.smartsheet.com/2.0/sheets/'+sheet
    headers={'Authorization':'Bearer '+token}
    r=requests.get(base+'/columns',headers=headers,timeout=15);r.raise_for_status()
@@ -191,17 +189,19 @@ def smartsheet_config():
    mapping={'first_name':'First Name','last_name':'Last Name','email':'Email','phone':'Phone #','address':'Address','description':'Notes:','status':'Status','date_realized':'Date Realized'}
    missing=[title for title in mapping.values() if title.casefold() not in by_title]
    if missing:raise ValueError('Required intake columns missing: '+', '.join(missing))
-   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject')]:
+   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject'),('submitted_at','Website Submitted At')]:
     if title.casefold() not in by_title:
      r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
      added=r.json()['result'];columns.extend(added)
      by_title.update({c['title'].strip().casefold():c for c in added})
     mapping[key]=title
-   job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in ('job','jobnumber')),None)
+   job_aliases={customer_database.norm(title) for title in customer_database.ALIASES['job_number']}
+   job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in job_aliases),None)
    if job_title:mapping['job_number']=job_title
    manager_title=next((col['title'] for col in columns if re.match(r'^manager\b',col['title'].strip(),re.I)),None)
    if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
+   _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns})
    app.logger.warning('Smartsheet intake column mapping ready')
    return token,sheet,_intake_columns
   except (requests.RequestException,ValueError,KeyError):
@@ -294,6 +294,23 @@ def portal():
 
 def sync_ticket(tid):
  with _intake_lock:return _sync_ticket(tid)
+
+def intake_values(ticket, submitted_job='', client_sheet=None):
+ t=dict(ticket);matched=None;related_jobs=[]
+ if client_sheet is not None:
+  resolution=customer_database.intake_lookup(client_sheet,email=t['email'],name=t['name'],telephone=t['phone'],address=t['address'],job_number=submitted_job)
+  matched=resolution['record'];related_jobs=resolution['job_numbers']
+ name=(matched or {}).get('name') or t['name']
+ parts=name.strip().split(maxsplit=1)
+ submitted=datetime.datetime.fromisoformat(t['created'].replace('Z','+00:00')).astimezone(ZoneInfo('America/Los_Angeles'))
+ timestamp=submitted.strftime('%m/%d/%Y %I:%M:%S %p %Z')
+ return {**t,'job_number':' / '.join(related_jobs) if related_jobs else submitted_job or None,
+  'ticket':t['id'],'status':'000 - Intake',
+  'first_name':(matched or {}).get('first_name') or (parts[0] if parts else ''),
+  'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''),
+  'date_realized':submitted.date().isoformat(),'submitted_at':timestamp,
+  'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite ticket: '+t['id']+('\n\nClient database job references for this customer and address: '+', '.join(related_jobs) if related_jobs else '')}
+
 def _sync_ticket(tid):
  cfg=smartsheet_config()
  if not cfg:return False
@@ -307,21 +324,16 @@ def _sync_ticket(tid):
    if matches:row=str(matches[0]['id'])
    else:
     with engine.connect() as c:job_number=c.execute(select(ticket_details.c.job_number).where(ticket_details.c.ticket_id==tid)).scalar()
-    matched=None;related_jobs=[]
+    sheet=None
     try:
      sheet=customer_database.get_sheet()
-     related_jobs=customer_database.related_job_numbers(sheet,t['email'],t['name'],t['address'])
-     matched=customer_database.match(sheet,t['email'],'job_number',job_number) if job_number else customer_database.match(sheet,t['email'])
-     if not matched and not job_number:matched=customer_database.match(sheet,t['email'],'phone',t['phone'])
-     if not matched and not job_number:matched=customer_database.match(sheet,t['email'],'name',t['name'])
     except (requests.RequestException,RuntimeError,ValueError,KeyError):
      app.logger.warning('Client database matching unavailable; submitted details retained')
-    if matched:
-     t['name']=matched.get('name') or t['name'];t['phone']=matched.get('phone') or t['phone']
-     t['address']=customer_database.intake_address(matched) or t['address']
-     job_number=matched.get('job_number') or job_number
-    parts=t['name'].strip().split(maxsplit=1)
-    vals={**t,'job_number':job_number,'ticket':tid,'status':'000 - Intake','first_name':(matched or {}).get('first_name') or parts[0],'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''), 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid+('\n\nClient database job references for this customer and address: '+', '.join(related_jobs) if related_jobs else '')};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
+    try:vals=intake_values(t,job_number,sheet)
+    except (RuntimeError,ValueError,KeyError):
+     app.logger.warning('Client database matching unavailable; submitted details retained')
+     vals=intake_values(t,job_number)
+    cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
    with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
   with engine.connect() as c:fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
@@ -393,12 +405,13 @@ def save_ticket():
   if total>20*1024*1024 or not valid:abort(400,description='Use JPG, PNG, WebP or PDF files totaling at most 20 MB.')
   stored.append(dict(id=secrets.token_hex(16),user_id=u['id'],name=x.filename[:200],type=x.mimetype,data=blob,synced=0))
  tid='HOS-'+secrets.token_hex(6).upper()
+ created_at=now()
  with engine.begin() as c:
-  c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
+  c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • awaiting intake connection',**d))
   c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
  _intake_wake.set()
- return {'id':tid,'ticket':dict(id=tid,created=now(),status='Saved • delivering to service team',files=[],**d),'message':'Your ticket is saved. Delivery to the service team is continuing in the background.'}
+ return {'id':tid,'ticket':dict(id=tid,created=created_at,status='Saved • delivering to service team',files=[],**d),'message':'Your ticket is saved. Delivery to the service team is continuing in the background.'}
 @app.get('/api/file')
 def file_download():
  u=required()
@@ -455,8 +468,18 @@ def check_client_database():
  try:
   sheet=customer_database.get_sheet()
   app.logger.warning('Client intake database accessible; columns: %s', ', '.join(col['title'] for col in sheet.get('columns',[])))
+  if engine:
+   # Read-only verification against recent submissions. Log only presence/counts,
+   # never client names, contact details or the matched job numbers.
+   with engine.connect() as c:
+    recent=list(c.execute(select(tickets.c.id,tickets.c.name,tickets.c.email,tickets.c.phone,tickets.c.address,ticket_details.c.job_number).outerjoin(ticket_details,tickets.c.id==ticket_details.c.ticket_id).order_by(tickets.c.created.desc()).limit(1)).mappings())
+   for t in recent:
+    result=customer_database.intake_lookup(sheet,email=t['email'],name=t['name'],telephone=t['phone'],address=t['address'],job_number=t['job_number'])
+    app.logger.warning('Intake lookup check for %s: matched=%s, last_name=%s, job_count=%s',t['id'],bool(result['record']),bool((result['record'] or {}).get('last_name')),len(result['job_numbers']))
  except (requests.RequestException,RuntimeError,ValueError,KeyError):
   app.logger.warning('Client intake database unavailable: API account must have access to the configured client sheet')
+ except SQLAlchemyError:
+   app.logger.warning('Recent intake lookup check deferred: account storage unavailable')
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
