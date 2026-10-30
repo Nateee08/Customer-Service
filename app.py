@@ -269,7 +269,10 @@ def save_ticket():
    c.execute(insert(reviews).values(id=review_id,user_id=u['id'],ticket_id=t.id,data=data,created=now()))
    feedback='\n'.join(k+': '+f.get(k,'') for k in ('serviceDate','Service technician','Service department','notes','customerName'))
    notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
-  return {'message':'Your feedback has been saved.'}
+  if notifications.configured():
+   threading.Thread(target=notifications.deliver_pending,args=(engine,email_outbox,app.logger),daemon=True).start()
+   return {'message':'Your feedback has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}
+  return {'message':'Your feedback has been saved. Email delivery is pending because the service team’s email connection is not yet enabled.','emailStatus':'not_configured'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
  city=f.get('city','').strip();state=f.get('state','').strip().upper();postal=f.get('postal','').strip();address2=f.get('address2','').strip()
  if not d['address'] or len(d['address'])>150 or not city or len(city)>100 or not re.fullmatch(r'[A-Z]{2}',state) or not re.fullmatch(r'\d{5}(?:-\d{4})?',postal) or len(address2)>150:abort(400,description='Enter the full address, including city, two-letter state, and ZIP code.')
