@@ -224,7 +224,7 @@ def portal():
    if 'closed' in (t['status'] or '').casefold() or re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()) or t['status']=='Deleted from Smartsheet':continue
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in ts if t['status']!='Deleted from Smartsheet']
+ feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
 
 def sync_ticket(tid):

@@ -19,7 +19,7 @@ class ClosedTicketsTests(unittest.TestCase):
     with patch.object(care,'smart_request',return_value=r):
      data=client.get('/api/portal').json
     self.assertEqual(data['tickets'],[])
-    self.assertEqual(data['feedbackTickets'],[{'id':tid,'subject':'Completed work'}])
+    self.assertEqual(data['feedbackTickets'],[])
    with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
     self.assertEqual(client.get('/api/portal').json['tickets'],[])
    r.json.return_value={'columns':[{'id':56,'title':'Manager Assigned'}],'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'},{'columnId':56,'objectValue':{'values':[{'name':'02-Alec','email':'test@example.invalid'}]}}]}]}
@@ -27,6 +27,7 @@ class ClosedTicketsTests(unittest.TestCase):
     portal=client.get('/api/portal').json
     self.assertEqual(portal['tickets'][0]['id'],tid)
     self.assertEqual(portal['tickets'][0]['manager'],'02-Alec')
+    self.assertEqual(portal['feedbackTickets'],[{'id':tid,'subject':'Completed work'}])
     self.assertTrue(portal['updatedAt'])
    # A failed or partial read must never make an active ticket disappear.
    with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
