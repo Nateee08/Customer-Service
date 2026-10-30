@@ -176,6 +176,7 @@ def smartsheet_config():
      added=r.json()['result'];columns.extend(added)
      by_title.update({c['title'].strip().casefold():c for c in added})
     mapping[key]=title
+   if 'manager' in by_title:mapping['manager']='Manager'
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
    app.logger.warning('Smartsheet intake column mapping ready')
    return token,sheet,_intake_columns
@@ -191,24 +192,33 @@ def portal():
  u=required();cfg=smartsheet_config();rows=[];connected=False
  if cfg:
   try:
-   r=smart_request('GET','');r.raise_for_status();rows=r.json().get('rows',[]);connected=True
+   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();sheet_data=r.json();rows=sheet_data.get('rows');connected=isinstance(rows,list) and len(rows)>=sheet_data.get('totalRowCount',len(rows) if isinstance(rows,list) else 0)
+   if not connected:rows=[]
   except requests.RequestException:pass
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
-  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in ts]
   active=[]
   for t in ts:
    t.pop('queue',None)
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
+    manager_column=cfg[2].get('manager') or next((col['id'] for col in sheet_data.get('columns',[]) if col.get('title','').strip().casefold()=='manager'),None)
+    manager_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(manager_column)),{})
+    manager=manager_cell.get('displayValue') or manager_cell.get('value')
+    t['manager']=str(manager) if isinstance(manager,(str,int,float)) else None
     if status:
      t['status']=str(status)
      c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
-   if 'closed' in (t['status'] or '').casefold():continue
+   elif connected and t['row_id']:
+    # Only a successful, complete sheet read can establish that a synced row was deleted.
+    t['status']='Deleted from Smartsheet'
+    c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
+   if 'closed' in (t['status'] or '').casefold() or re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()) or t['status']=='Deleted from Smartsheet':continue
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected)
+ feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in ts if t['status']!='Deleted from Smartsheet']
+ return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
 
 def sync_ticket(tid):
  with _intake_lock:return _sync_ticket(tid)
@@ -237,8 +247,7 @@ def _sync_ticket(tid):
  except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
   response=getattr(exc,'response',None)
   app.logger.warning('Smartsheet delivery pending for ticket %s; HTTP status %s',tid,getattr(response,'status_code','unavailable'))
-  if row:
-   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(status='000 - Intake • attachments awaiting transfer'))
+  # Attachment retries must not overwrite completed/deleted status.
   return False
 @app.post('/api/portal')
 def save_ticket():
@@ -255,6 +264,9 @@ def save_ticket():
    notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
   return {'message':'Your feedback has been saved.'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
+ city=f.get('city','').strip();state=f.get('state','').strip().upper();postal=f.get('postal','').strip();address2=f.get('address2','').strip()
+ if not d['address'] or len(d['address'])>150 or not city or len(city)>100 or not re.fullmatch(r'[A-Z]{2}',state) or not re.fullmatch(r'\d{5}(?:-\d{4})?',postal) or len(address2)>150:abort(400,description='Enter the full address, including city, two-letter state, and ZIP code.')
+ d['address']='\n'.join(x for x in (d['address'],address2,city+', '+state+' '+postal) if x)
  categories=list(dict.fromkeys(x.strip() for x in f.getlist('category') if x.strip()))
  if not categories or any(x not in ('Solar','Battery','Generac','Monitoring','Warranty','Other') for x in categories):abort(400,description='Select at least one valid system or service type.')
  d['category']=', '.join(categories)

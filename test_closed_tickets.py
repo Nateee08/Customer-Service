@@ -9,12 +9,12 @@ class ClosedTicketsTests(unittest.TestCase):
   client=care.app.test_client()
   client.post('/register',data={'name':'Closed Test','email':'closed@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
   with patch.object(care,'smartsheet_config',return_value=None):
-   response=client.post('/api/portal',data={'name':'Closed Test','phone':'5550100','address':'Service address','category':'Solar','subject':'Completed work','description':'Test','ack':'on'},headers={'Origin':'http://localhost'})
+   response=client.post('/api/portal',data={'name':'Closed Test','phone':'5550100','city':'Woodland','state':'CA','postal':'95695','address':'Service address','category':'Solar','subject':'Completed work','description':'Test','ack':'on'},headers={'Origin':'http://localhost'})
   tid=response.json['id']
   with care.engine.begin() as c:c.execute(care.update(care.tickets).where(care.tickets.c.id==tid).values(row_id='123'))
-  cfg=('secret','sheet',{'status':55})
+  cfg=('secret','sheet',{'status':55,'manager':56})
   with patch.object(care,'smartsheet_config',return_value=cfg):
-   for status in ['030 - Closed','031 - Closed Phone Support','032 - Closed Text Support','CLOSED','closed - resolved']:
+   for status in ['030 - Closed','031 - Closed Phone Support','032 - Closed Text Support','CLOSED','closed - resolved','Completed','040 - Completed','COMPLETE']:
     r=Mock();r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':status}]}]}
     with patch.object(care,'smart_request',return_value=r):
      data=client.get('/api/portal').json
@@ -22,8 +22,26 @@ class ClosedTicketsTests(unittest.TestCase):
     self.assertEqual(data['feedbackTickets'],[{'id':tid,'subject':'Completed work'}])
    with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
     self.assertEqual(client.get('/api/portal').json['tickets'],[])
-   r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'}]}]}
+   r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'},{'columnId':56,'displayValue':'02-Alec'}]}]}
    with patch.object(care,'smart_request',return_value=r):
-    self.assertEqual(client.get('/api/portal').json['tickets'][0]['id'],tid)
+    portal=client.get('/api/portal').json
+    self.assertEqual(portal['tickets'][0]['id'],tid)
+    self.assertEqual(portal['tickets'][0]['manager'],'02-Alec')
+    self.assertTrue(portal['updatedAt'])
+   # A failed or partial read must never make an active ticket disappear.
+   with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
+    self.assertEqual(len(client.get('/api/portal').json['tickets']),1)
+   r.json.return_value={'rows':[],'totalRowCount':100}
+   with patch.object(care,'smart_request',return_value=r):
+    self.assertEqual(len(client.get('/api/portal').json['tickets']),1)
+   r.json.return_value={'rows':[],'totalRowCount':0}
+   with patch.object(care,'smart_request',return_value=r):
+    self.assertEqual(client.get('/api/portal').json['tickets'],[])
+   with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
+    self.assertEqual(client.get('/api/portal').json['tickets'],[])
+   # A restored row with an active status reappears.
+   r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':'Incomplete'}]}]}
+   with patch.object(care,'smart_request',return_value=r):
+    self.assertEqual(len(client.get('/api/portal').json['tickets']),1)
   with care.engine.connect() as c:
    self.assertIsNotNone(c.execute(care.select(care.tickets).where(care.tickets.c.id==tid)).first())

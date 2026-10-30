@@ -6,7 +6,7 @@ class IntakeTests(unittest.TestCase):
  def test_actual_column_mapping_and_retry(self):
   client=care.app.test_client();client.post('/register',data={'name':'Intake Test','email':'intake@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
   with patch.object(care,'smartsheet_config',return_value=None):
-   response=client.post('/api/portal',data={'name':'Jane Smith','phone':'5550100','address':'Service address','category':'Solar','subject':'Six panels offline','description':'Monitoring issue','ack':'on'},headers={'Origin':'http://localhost'})
+   response=client.post('/api/portal',data={'name':'Jane Smith','phone':'5550100','city':'Woodland','state':'CA','postal':'95695','address':'Service address','category':'Solar','subject':'Six panels offline','description':'Monitoring issue','ack':'on'},headers={'Origin':'http://localhost'})
   tid=response.json['id'];cols={k:i+1 for i,k in enumerate(['ticket','first_name','last_name','email','phone','address','subject','description','status','queue','date_realized'])}
   calls=[]
   def api(method,path,**kwargs):

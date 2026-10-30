@@ -8,7 +8,7 @@ class MultiSystemTests(unittest.TestCase):
  def test_multiple_selections_validation_and_smartsheet_notes(self):
   client=care.app.test_client()
   client.post('/register',data={'name':'Systems Test','email':'systems@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
-  base={'name':'Systems Test','phone':'5550100','address':'Service address','subject':'Combined issue','description':'Test request','ack':'on'}
+  base={'name':'Systems Test','phone':'5550100','city':'Woodland','state':'CA','postal':'95695','address':'Service address','subject':'Combined issue','description':'Test request','ack':'on'}
   for choices,expected in [(['Solar','Battery'],'Solar, Battery'),(['Solar','Monitoring'],'Solar, Monitoring'),(['Battery'],'Battery'),(['Solar','Solar','Battery'],'Solar, Battery')]:
    data=MultiDict(base)
    for choice in choices:data.add('category',choice)
