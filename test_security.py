@@ -1,4 +1,4 @@
-import os,tempfile,unittest,re,secrets,time
+import os,tempfile,unittest,re,secrets,time,threading
 from unittest.mock import patch
 _tmp=tempfile.TemporaryDirectory();os.environ.setdefault('DATABASE_URL','sqlite:///'+_tmp.name+'/test.db');os.environ.pop('RENDER',None)
 import app as care
@@ -30,7 +30,54 @@ class SecurityTests(unittest.TestCase):
   c=care.app.test_client()
   with patch('notifications.send_account_email',side_effect=RuntimeError()):
    r=c.post('/register',data={'name':'Test','email':secrets.token_hex(8)+'@test.invalid','password':'long-test-password-123'},headers={'Origin':'http://localhost'})
-  self.assertEqual(r.status_code,503);self.assertIsNone(c.get('/api/me').json['user'])
+  self.assertEqual(r.status_code,302)
+  self.assertEqual(c.get('/api/account-verification').json['state'],'failed')
+  self.assertIn('couldn',c.get('/verify-account').text)
+  self.assertIsNone(c.get('/api/me').json['user'])
+ def test_slow_email_does_not_block_signup_or_grant_access(self):
+  c=care.app.test_client();entered=threading.Event();release=threading.Event()
+  def slow_send(*args):
+   entered.set();release.wait(5)
+  with patch.dict(care.app.config,{'ACCOUNT_EMAIL_ASYNC':True}),patch('notifications.send_account_email',side_effect=slow_send) as send:
+   try:
+    start=time.monotonic()
+    r=c.post('/register',data={'name':'Async','email':secrets.token_hex(8)+'@test.invalid','password':'long-test-password-123'},headers={'Origin':'http://localhost'})
+    self.assertLess(time.monotonic()-start,2)
+    self.assertEqual(r.status_code,302);self.assertTrue(entered.wait(1))
+    self.assertEqual(c.get('/api/account-verification').json['state'],'sending')
+    self.assertIsNone(c.get('/api/me').json['user'])
+    code=re.search(r'code is: (\d{8})',send.call_args.args[2]).group(1)
+   finally:
+    release.set()
+    for thread in threading.enumerate():
+     if thread.name=='account-email':thread.join(2)
+  self.assertEqual(c.get('/api/account-verification').json['state'],'sent')
+  self.assertEqual(self.verify(c,code).status_code,302)
+ def test_interrupted_signup_can_resume_only_with_correct_password(self):
+  c,old_code,email=self.new_account()
+  form={'name':'Changed name','email':email,'password':'wrong-password-12345'}
+  with patch('notifications.send_account_email') as send:
+   self.assertEqual(c.post('/register',data=form,headers={'Origin':'http://localhost'}).status_code,400)
+   send.assert_not_called()
+   form['password']='long-test-password-123'
+   self.assertEqual(c.post('/register',data=form,headers={'Origin':'http://localhost'}).status_code,302)
+   code=re.search(r'code is: (\d{8})',send.call_args.args[2]).group(1)
+  self.assertEqual(self.verify(c,old_code).status_code,400)
+  self.assertEqual(self.verify(c,code).status_code,302)
+  with care.engine.connect() as db:
+   self.assertEqual(db.execute(select(care.users.c.name).where(care.users.c.email==email)).scalar_one(),'Test Owner')
+ def test_resend_invalidates_old_code_and_expired_delivery_stops_waiting(self):
+  c,old_code,_=self.new_account();token=care.digest(c.get_cookie('care_challenge').value)
+  with care.engine.begin() as db:
+   db.execute(update(care.account_deliveries).where(care.account_deliveries.c.token==token).values(started=int(time.time())-60,state='sending'))
+  self.assertEqual(c.get('/api/account-verification').json['state'],'failed')
+  with patch('notifications.send_account_email') as send:
+   r=c.post('/verify-account/resend',headers={'Origin':'http://localhost'})
+   self.assertEqual(r.status_code,302)
+   code=re.search(r'code is: (\d{8})',send.call_args.args[2]).group(1)
+  self.assertEqual(self.verify(c,old_code).status_code,400)
+  self.assertEqual(self.verify(c,code).status_code,302)
+  self.assertEqual(c.get('/api/account-verification').json['state'],'expired')
  def test_cross_customer_files_and_reviews(self):
   a,code,_=self.new_account();self.verify(a,code)
   b,code,_=self.new_account();self.verify(b,code)
