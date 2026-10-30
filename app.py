@@ -90,7 +90,6 @@ def me():
 def document(name):
  if name not in DOCS:abort(404)
  with open(os.path.join(os.path.dirname(__file__),DOCS[name])) as f:data=base64.b64decode(f.read())
- if name=='quality-assurance.pdf':data=qa_pdf.template()
  return send_file(io.BytesIO(data),mimetype='application/pdf',download_name=name,as_attachment=request.args.get('download')=='1')
 def rate(key,max_count=10):
  bucket=str(int(time.time())//900);key=digest(key+bucket)
@@ -329,6 +328,12 @@ def qa_background():
  return send_file(io.BytesIO(base64.b64decode((Path(__file__).parent/'pdf-data/qa-background.b64').read_text())),mimetype='image/jpeg')
 @app.get('/qa/template')
 def qa_template():
+ u=required()
+ with engine.connect() as c:
+  t=c.execute(select(tickets).where(tickets.c.id==request.args.get('ticketId'),tickets.c.user_id==u['id'])).first()
+  if not t:abort(404)
+  closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t.id)).scalar()
+  if not warranty_dates.is_closed(t.status) or closed_at is None or time.time()>=closed_at+259200:abort(403)
  return send_file(io.BytesIO(qa_pdf.template()),mimetype='application/pdf',download_name='Quality-Assurance-Form.pdf')
 @app.post('/api/portal')
 def save_ticket():
