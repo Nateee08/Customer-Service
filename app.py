@@ -190,16 +190,23 @@ def portal():
   try:
    r=smart_request('GET','');r.raise_for_status();rows=r.json().get('rows',[]);connected=True
   except requests.RequestException:pass
- with engine.connect() as c:
+ with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
+  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in ts]
+  active=[]
   for t in ts:
-   t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    t.pop('queue',None)
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
-    if status:t['status']=str(status)
- return jsonify(tickets=ts,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected)
+    if status:
+     t['status']=str(status)
+     c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
+   if 'closed' in (t['status'] or '').casefold():continue
+   t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
+   active.append(t)
+ return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected)
+
 def sync_ticket(tid):
  with _intake_lock:return _sync_ticket(tid)
 def _sync_ticket(tid):
