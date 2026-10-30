@@ -191,9 +191,14 @@ def smartsheet_config():
    if missing:raise ValueError('Required intake columns missing: '+', '.join(missing))
    for key,title in [('ticket','Website Ticket #'),('subject','Website Subject'),('submitted_at','Website Submitted At')]:
     if title.casefold() not in by_title:
-     r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
-     added=r.json()['result'];columns.extend(added)
-     by_title.update({c['title'].strip().casefold():c for c in added})
+     try:
+      r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
+      added=r.json()['result'];columns.extend(added)
+      by_title.update({c['title'].strip().casefold():c for c in added})
+     except (requests.RequestException,ValueError,KeyError) as exc:
+      if key!='submitted_at':raise
+      app.logger.warning('Submission time retained in intake notes; timestamp column unavailable (HTTP %s)',getattr(getattr(exc,'response',None),'status_code','unavailable'))
+      continue
     mapping[key]=title
    job_aliases={customer_database.norm(title) for title in customer_database.ALIASES['job_number']}
    job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in job_aliases),None)
@@ -204,9 +209,9 @@ def smartsheet_config():
    _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns})
    app.logger.warning('Smartsheet intake column mapping ready')
    return token,sheet,_intake_columns
-  except (requests.RequestException,ValueError,KeyError):
+  except (requests.RequestException,ValueError,KeyError) as exc:
    _intake_retry_at=time.time()+60
-   app.logger.warning('Smartsheet intake setup failed; will retry. Check API access and required column titles.')
+   app.logger.warning('Smartsheet intake setup failed; will retry (%s, HTTP %s)',type(exc).__name__,getattr(getattr(exc,'response',None),'status_code','unavailable'))
    return None
 
 def smart_request(method,path,**kwargs):
