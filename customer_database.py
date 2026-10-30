@@ -22,6 +22,14 @@ ALIASES = {
 
 def norm(v): return re.sub(r'[^a-z0-9]', '', str(v).casefold())
 def phone(v): return re.sub(r'\D', '', str(v))[-10:]
+def format_phone(value):
+    """Format a complete US number; preserve other numbers/extensions verbatim."""
+    value = str(value or '').strip()
+    if re.search(r'[^0-9+().\s-]', value): return value
+    digits = re.sub(r'\D', '', value)
+    if len(digits) == 11 and digits.startswith('1'): digits = digits[1:]
+    if len(digits) != 10: return value
+    return f'({digits[:3]}){digits[3:6]}-{digits[6:]}'
 def emails(v): return {x.casefold() for x in re.findall(r'[^\s,;<>]+@[^\s,;<>]+', str(v))}
 
 def get_sheet():

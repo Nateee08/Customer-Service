@@ -169,6 +169,8 @@ def reset(token):
   c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']));c.execute(delete(challenges).where(challenges.c.user_id==row['user_id']))
  return redirect('/login')
 _intake_lock=threading.RLock()
+_intake_attachment_lock=threading.Lock()
+_intake_delivery_slots=threading.BoundedSemaphore(4)
 _intake_columns=None
 _intake_retry_at=0
 def smartsheet_config():
@@ -297,8 +299,36 @@ def portal():
  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
 
-def sync_ticket(tid):
- with _intake_lock:return _sync_ticket(tid)
+def sync_ticket(tid,include_files=True):
+ # Serialize row writes/reconciliation, but never keep a new row waiting for uploads.
+ with _intake_lock:delivered=_sync_ticket(tid)
+ if not delivered:return False
+ return sync_ticket_files(tid) if include_files else True
+
+def deliver_intake_now(tid,wait_seconds=8):
+ # Start independently of the retry worker's attachment and warranty backlog.
+ # Bound both concurrent work and the HTTP response wait during an API outage.
+ if not os.getenv('SMARTSHEET_TOKEN') or not os.getenv('SMARTSHEET_SHEET_ID') or not _intake_delivery_slots.acquire(blocking=False):
+  _intake_wake.set()
+  return False
+ finished=threading.Event();result={}
+ def deliver():
+  started=time.monotonic()
+  try:
+   result['delivered']=sync_ticket(tid,include_files=False)
+   if result['delivered']:app.logger.warning('Immediate Smartsheet delivery confirmed for ticket %s in %.2fs',tid,time.monotonic()-started)
+  except Exception:
+   app.logger.warning('Immediate intake deferred for ticket %s; request remains saved',tid)
+  finally:
+   _intake_delivery_slots.release()
+   _intake_wake.set()
+   finished.set()
+ try:threading.Thread(target=deliver,name='intake-'+tid,daemon=True).start()
+ except RuntimeError:
+  _intake_delivery_slots.release();_intake_wake.set()
+  return False
+ finished.wait(wait_seconds)
+ return result.get('delivered',False)
 
 def intake_values(ticket, submitted_job='', client_sheet=None):
  t=dict(ticket);matched=None;related_jobs=[]
@@ -310,6 +340,7 @@ def intake_values(ticket, submitted_job='', client_sheet=None):
  submitted=datetime.datetime.fromisoformat(t['created'].replace('Z','+00:00')).astimezone(ZoneInfo('America/Los_Angeles'))
  timestamp=submitted.strftime('%m/%d/%Y %I:%M:%S %p %Z')
  return {**t,'job_number':' / '.join(related_jobs) if related_jobs else submitted_job or None,
+  'phone':customer_database.format_phone(t['phone']),
   'ticket':t['id'],'status':'000 - Intake',
   'first_name':(matched or {}).get('first_name') or (parts[0] if parts else ''),
   'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''),
@@ -324,7 +355,7 @@ def _sync_ticket(tid):
  try:
   if not row:
    # Reconcile by unique ticket number before retrying a possibly accepted request.
-   r=smart_request('GET','');r.raise_for_status();matches=[r for r in r.json().get('rows',[]) if any(str(c['columnId'])==str(cfg[2]['ticket']) and c.get('value')==tid for c in r.get('cells',[]))]
+   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();matches=[r for r in r.json().get('rows',[]) if any(str(c['columnId'])==str(cfg[2]['ticket']) and c.get('value')==tid for c in r.get('cells',[]))]
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
@@ -341,17 +372,29 @@ def _sync_ticket(tid):
     cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
    with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
-  with engine.connect() as c:fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
-  for f in fs:
-   r=smart_request('POST','/rows/'+row+'/attachments',data=f['data'],headers={'Content-Type':f['type'],'Content-Disposition':'attachment; filename="'+re.sub('[^a-zA-Z0-9._-]','_',f['name'])+'"'});r.raise_for_status()
-   with engine.begin() as c:c.execute(update(files).where(files.c.id==f['id']).values(synced=1))
-  app.logger.warning('Smartsheet delivery confirmed for ticket %s',tid)
+   app.logger.warning('Smartsheet delivery confirmed for ticket %s',tid)
   return True
  except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
   response=getattr(exc,'response',None)
   app.logger.warning('Smartsheet delivery pending for ticket %s; HTTP status %s',tid,getattr(response,'status_code','unavailable'))
-  # Attachment retries must not overwrite completed/deleted status.
   return False
+
+def sync_ticket_files(tid):
+ # Separate upload locking preserves duplicate protection without blocking row creation.
+ with _intake_attachment_lock:
+  try:
+   with engine.connect() as c:
+    row=c.execute(select(tickets.c.row_id).where(tickets.c.id==tid)).scalar()
+    fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
+   if not row:return False
+   for f in fs:
+    r=smart_request('POST','/rows/'+row+'/attachments',data=f['data'],headers={'Content-Type':f['type'],'Content-Disposition':'attachment; filename="'+re.sub('[^a-zA-Z0-9._-]','_',f['name'])+'"'});r.raise_for_status()
+    with engine.begin() as c:c.execute(update(files).where(files.c.id==f['id']).values(synced=1))
+   return True
+  except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
+   app.logger.warning('Smartsheet attachment delivery pending for ticket %s; HTTP status %s',tid,getattr(getattr(exc,'response',None),'status_code','unavailable'))
+   # Attachment retries must not overwrite completed/deleted status.
+   return False
 @app.get('/qa/background')
 def qa_background():
  return send_file(io.BytesIO(base64.b64decode((Path(__file__).parent/'pdf-data/qa-background.b64').read_text())),mimetype='image/jpeg')
@@ -401,6 +444,7 @@ def save_ticket():
  if not categories or any(x not in ('Solar','Battery','Generac','Monitoring','Warranty','Other') for x in categories):abort(400,description='Select at least one valid system or service type.')
  d['category']=', '.join(categories)
  if any(not d[k] or len(d[k])>(5000 if k=='description' else 300) for k in fields):abort(400,description='Please complete all fields and keep the description under 5,000 characters.')
+ d['phone']=customer_database.format_phone(d['phone'])
  if f.get('ack')!='on':abort(400,description='Please acknowledge the service rates and policies.')
  uploads=[x for x in request.files.getlist('photos') if x.filename];stored=[];total=0
  if len(uploads)>5:abort(400,description='Attach up to 5 files.')
@@ -415,8 +459,10 @@ def save_ticket():
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • awaiting intake connection',**d))
   c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
- _intake_wake.set()
- return {'id':tid,'ticket':dict(id=tid,created=created_at,status='Saved • delivering to service team',files=[],**d),'message':'Your ticket is saved. Delivery to the service team is continuing in the background.'}
+ delivered=deliver_intake_now(tid)
+ status='000 - Intake' if delivered else 'Saved • delivering to service team'
+ message='Your ticket has been submitted to the service team.' if delivered else 'Your ticket is saved. Delivery to the service team is pending and will retry automatically. Please do not submit it again.'
+ return {'id':tid,'deliveryStatus':'delivered' if delivered else 'pending','ticket':dict(id=tid,created=created_at,status=status,files=[],**d),'message':message}
 @app.get('/api/file')
 def file_download():
  u=required()
