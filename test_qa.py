@@ -17,6 +17,7 @@ class QaWorkflowTests(unittest.TestCase):
   form={'action':'review','ticketId':tid,'customerName':'QA Test','signatureDate':'2026-10-30','serviceDate':'2026-10-30','Service technician':'Meets','Service department':'Exceeds','notes':'QA notes'}
   self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,400)
   with care.engine.begin() as c:
+   c.execute(care.insert(care.request_numbers).values(ticket_id=tid,reference='HOS-123/456',synced=1))
    c.execute(care.update(care.tickets).where(care.tickets.c.id==tid).values(status='030 - Closed'))
    c.execute(care.insert(care.closures).values(ticket_id=tid,closed_at=int(care.time.time())))
   self.assertEqual(client.get('/qa/template?ticketId='+tid).status_code,200)
@@ -24,12 +25,14 @@ class QaWorkflowTests(unittest.TestCase):
   with patch.object(care.notifications,'configured',return_value=False):
    self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,200)
   with care.engine.connect() as c:
-   row=c.execute(care.select(care.email_outbox).where(care.email_outbox.c.subject=='Customer feedback - QA Test - '+tid)).mappings().one()
+   row=c.execute(care.select(care.email_outbox).where(care.email_outbox.c.subject=='Customer feedback - QA Test - HOS-123/456')).mappings().one()
    self.assertIn('alec@hookedonsolar.com',row['recipients']);self.assertIn('customerservice@hookedonsolar.com',row['recipients']);self.assertIn('qa_pdf',row['body'])
    import base64,io,json
    from pypdf import PdfReader
    from test_qa_pdf import QaPdfTests
    attachment=PdfReader(io.BytesIO(base64.b64decode(json.loads(row['body'])['pdf'])))
+   self.assertEqual(attachment.get_fields()['Job number']['/V'],'HOS-123/456')
+   self.assertEqual(json.loads(row['body'])['filename'],'Customer-feedback-HOS-123-456.pdf')
    checks=QaPdfTests()
    checks.assert_score(attachment,'Service technician','Meets')
    checks.assert_score(attachment,'Service department','Exceeds')

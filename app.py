@@ -13,6 +13,7 @@ import qa_pdf
 import account_security
 import customer_database
 import warranty_dates
+import ticket_numbers
 from sheet_snapshot import SheetSnapshot
 import sys
 app=Flask(__name__)
@@ -23,6 +24,8 @@ users=Table('care_users',meta,Column('id',String,primary_key=True),Column('email
 sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
 ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
+number_tables=ticket_numbers.define_tables(meta)
+customer_numbers,request_numbers,number_counters=number_tables
 warranties=Table('care_workmanship_dates',meta,Column('ticket_id',String,primary_key=True),Column('user_id',String,nullable=False),Column('started_at',String,nullable=False),Column('checked_version',String))
 closures=Table('care_ticket_closures',meta,Column('ticket_id',String,primary_key=True),Column('closed_at',Integer,nullable=False))
 files=Table('care_files',meta,Column('id',String,primary_key=True),Column('ticket_id',String,nullable=False),Column('user_id',String,nullable=False),Column('name',String),Column('type',String),Column('data',LargeBinary),Column('synced',Integer,default=0))
@@ -300,6 +303,7 @@ def portal():
     c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
    if t['status']=='Deleted from Smartsheet':continue
    t['deliveryStatus']='delivered' if t['row_id'] else 'pending'
+   t['reference']=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==t['id'])).scalar()
    closed='closed' in (t['status'] or '').casefold() or bool(re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()))
    if closed:
     closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
@@ -313,8 +317,8 @@ def portal():
     c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
- feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
+ with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
+ feedback_tickets=[{'id':t['id'],'reference':t['reference'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
 
 def sync_ticket(tid,include_files=True):
@@ -348,10 +352,19 @@ def deliver_intake_now(tid,wait_seconds=8):
  finished.wait(wait_seconds)
  return result.get('delivered',False)
 
-def intake_values(ticket, submitted_job='', client_sheet=None):
+def resolve_ticket_client(t, submitted_job='', client_sheet=None):
+ if client_sheet is None:return None
+ return customer_database.intake_lookup(client_sheet,email=t['email'],name=t['name'],telephone=t['phone'],address=t['address'],job_number=submitted_job)
+
+def assign_ticket_number(t,resolution=None):
+ with engine.begin() as c:
+  user=c.execute(select(users).where(users.c.id==t['user_id'])).mappings().first()
+  return ticket_numbers.assign(c,number_tables,t,user,resolution)
+
+def intake_values(ticket, submitted_job='', client_sheet=None, reference=None, resolution=None):
  t=dict(ticket);matched=None;related_jobs=[]
- if client_sheet is not None:
-  resolution=customer_database.intake_lookup(client_sheet,email=t['email'],name=t['name'],telephone=t['phone'],address=t['address'],job_number=submitted_job)
+ if resolution is None:resolution=resolve_ticket_client(t,submitted_job,client_sheet)
+ if resolution is not None:
   matched=resolution['record'];related_jobs=resolution['job_numbers']
  name=(matched or {}).get('name') or t['name']
  parts=name.strip().split(maxsplit=1)
@@ -359,11 +372,11 @@ def intake_values(ticket, submitted_job='', client_sheet=None):
  timestamp=submitted.strftime('%m/%d/%Y %I:%M:%S %p %Z')
  return {**t,'job_number':' / '.join(related_jobs) if related_jobs else submitted_job or None,
   'phone':customer_database.format_phone(t['phone']),
-  'ticket':t['id'],'status':'000 - Intake',
+  'ticket':reference or 'Number pending','status':'000 - Intake',
   'first_name':(matched or {}).get('first_name') or (parts[0] if parts else ''),
   'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''),
   'date_realized':submitted.date().isoformat(),'submitted_at':timestamp,
-  'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite ticket: '+t['id']+('\n\nClient database job references for this customer and address: '+', '.join(related_jobs) if related_jobs else '')}
+  'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite request ID: '+t['id']+('\n\nClient database job references: '+', '.join(related_jobs) if related_jobs else '')}
 
 def _sync_ticket(tid):
  cfg=smartsheet_config()
@@ -372,8 +385,8 @@ def _sync_ticket(tid):
  row=t['row_id']
  try:
   if not row:
-   # Reconcile by unique ticket number before retrying a possibly accepted request.
-   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();matches=[r for r in r.json().get('rows',[]) if any(str(c['columnId'])==str(cfg[2]['ticket']) and c.get('value')==tid for c in r.get('cells',[]))]
+   # Reconcile by the private request ID, never a repeated customer reference.
+   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();matches=[r for r in r.json().get('rows',[]) if ticket_numbers.matches_request(r,cfg[2],tid)]
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
@@ -383,19 +396,54 @@ def _sync_ticket(tid):
      sheet=customer_database.get_sheet()
     except (requests.RequestException,RuntimeError,ValueError,KeyError):
      app.logger.warning('Client database matching unavailable; submitted details retained')
-    try:vals=intake_values(t,job_number,sheet)
+    try:resolution=resolve_ticket_client(t,job_number,sheet)
     except (RuntimeError,ValueError,KeyError):
      app.logger.warning('Client database matching unavailable; submitted details retained')
-     vals=intake_values(t,job_number)
+     resolution=None
+    reference=assign_ticket_number(t,resolution)
+    vals=intake_values(t,job_number,reference=reference,resolution=resolution)
     cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
-   with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
+   with engine.begin() as c:
+    c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
+    # Reconciled rows already carry the saved reference when they came from this writer.
+    if not matches and reference:c.execute(update(request_numbers).where(request_numbers.c.ticket_id==tid).values(synced=1))
    app.logger.warning('Smartsheet delivery confirmed for ticket %s',tid)
   return True
  except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
   response=getattr(exc,'response',None)
   app.logger.warning('Smartsheet delivery pending for ticket %s; HTTP status %s',tid,getattr(response,'status_code','unavailable'))
   return False
+
+def refresh_ticket_numbers():
+ # Backfill existing requests, including completed warranty records, oldest first.
+ # Only the website-number column is updated; intake dates/statuses stay intact.
+ cfg=smartsheet_config()
+ if not cfg:return
+ with engine.connect() as c:
+  pending=list(c.execute(select(tickets,ticket_details.c.job_number,request_numbers.c.reference,request_numbers.c.synced)
+   .outerjoin(ticket_details,tickets.c.id==ticket_details.c.ticket_id)
+   .outerjoin(request_numbers,tickets.c.id==request_numbers.c.ticket_id)
+   .where((request_numbers.c.ticket_id.is_(None)) | (request_numbers.c.synced==0))
+   .order_by(tickets.c.created,tickets.c.id)).mappings())
+ sheet=None
+ for item in pending:
+  t=dict(item)
+  try:
+   reference=t['reference']
+   if not reference:
+    if sheet is None:sheet=customer_database.get_sheet()
+    reference=assign_ticket_number(t,resolve_ticket_client(t,t['job_number'],sheet))
+   with _intake_lock:
+    if not reference or not t['row_id'] or t['status']=='Deleted from Smartsheet':continue
+    r=smart_request('PUT','/rows',json=[{'id':int(t['row_id']),'cells':[{'columnId':int(cfg[2]['ticket']),'value':reference}]}])
+    # A deleted intake row must never be re-created by a numbering migration.
+    if r.status_code!=404:r.raise_for_status()
+    with engine.begin() as c:c.execute(update(request_numbers).where(request_numbers.c.ticket_id==t['id']).values(synced=1))
+    app.logger.warning('Customer ticket number synchronized for request %s',t['id'])
+  except (requests.RequestException,RuntimeError,ValueError,KeyError):
+   app.logger.warning('Customer ticket number retry pending for request %s',t['id'])
+   if sheet is None:break  # Do not repeat an unavailable client-sheet read for every row.
 
 def sync_ticket_files(tid):
  # Separate upload locking preserves duplicate protection without blocking row creation.
@@ -446,10 +494,12 @@ def save_ticket():
    review_id=secrets.token_hex(16)
    c.execute(insert(reviews).values(id=review_id,user_id=u['id'],ticket_id=t.id,data=data,created=now()))
    customer_name=' '.join(f['customerName'].split())[:100]
-   values=f.to_dict();values['Job number']=values.get('Job number') or t.id
+   reference=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==t.id)).scalar()
+   values=f.to_dict();values['Job number']=values.get('Job number') or reference or ''
    pdf=qa_pdf.completed(values)
-   payload=json.dumps({'kind':'qa_pdf','pdf':base64.b64encode(pdf).decode(),'filename':'Customer-feedback-'+t.id+'.pdf'})
-   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback - '+customer_name+' - '+t.id,payload,u['email'])
+   file_reference=re.sub(r'[^A-Za-z0-9_-]','-',reference) if reference else 'Service-request'
+   payload=json.dumps({'kind':'qa_pdf','pdf':base64.b64encode(pdf).decode(),'filename':'Customer-feedback-'+file_reference+'.pdf'})
+   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback - '+customer_name+' - '+(reference or 'Service request'),payload,u['email'])
   if notifications.configured():
    threading.Thread(target=notifications.deliver_pending,args=(engine,email_outbox,app.logger),daemon=True).start()
    return {'message':'Your completed QA form has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}
@@ -480,7 +530,8 @@ def save_ticket():
  delivered=deliver_intake_now(tid)
  status='000 - Intake' if delivered else 'Saved • delivering to service team'
  message='Your ticket has been submitted to the service team.' if delivered else 'Your ticket is saved. Delivery to the service team is pending and will retry automatically. Please do not submit it again.'
- return {'id':tid,'deliveryStatus':'delivered' if delivered else 'pending','ticket':dict(id=tid,created=created_at,status=status,files=[],**d),'message':message}
+ with engine.connect() as c:reference=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==tid)).scalar()
+ return {'id':tid,'deliveryStatus':'delivered' if delivered else 'pending','ticket':dict(id=tid,reference=reference,created=created_at,status=status,files=[],**d),'message':message}
 @app.get('/api/file')
 def file_download():
  u=required()
@@ -504,7 +555,7 @@ def staff_page():
    with engine.begin() as c:c.execute(update(users).where(users.c.id==uid).values(plan=plan,minutes_used=minutes,**dates))
   return redirect('/staff')
  with engine.connect() as c:
-  us=list(c.execute(select(users.c.id,users.c.email,users.c.name,users.c.plan,users.c.membership_start,users.c.membership_end,users.c.minutes_used,users.c.completion_date)).mappings());ts=list(c.execute(select(tickets).order_by(tickets.c.created.desc()).limit(100)).mappings());rs=list(c.execute(select(reviews).order_by(reviews.c.created.desc()).limit(100)).mappings())
+  us=list(c.execute(select(users.c.id,users.c.email,users.c.name,users.c.plan,users.c.membership_start,users.c.membership_end,users.c.minutes_used,users.c.completion_date)).mappings());ts=list(c.execute(select(tickets,request_numbers.c.reference).outerjoin(request_numbers,tickets.c.id==request_numbers.c.ticket_id).order_by(tickets.c.created.desc()).limit(100)).mappings());rs=list(c.execute(select(reviews,request_numbers.c.reference).outerjoin(request_numbers,reviews.c.ticket_id==request_numbers.c.ticket_id).order_by(reviews.c.created.desc()).limit(100)).mappings())
  token=request.cookies.get('care_csrf') or secrets.token_urlsafe(32);r=make_response(render_template('staff.html',users=us,tickets=ts,reviews=rs,csrf=token,connected=bool(smartsheet_config())));r.set_cookie('care_csrf',token,httponly=True,secure=bool(os.getenv('RENDER')),samesite='Lax');return r
 @app.cli.command('create-admin')
 def create_admin():
@@ -521,6 +572,8 @@ def retry_pending_intake():
  while True:
   try:
    if engine and smartsheet_config():
+    try:refresh_ticket_numbers()
+    except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
     with engine.connect() as c:
      pending=set(c.execute(select(tickets.c.id).where(tickets.c.row_id.is_(None))).scalars())
      pending.update(c.execute(select(files.c.ticket_id).where(files.c.synced==0)).scalars())

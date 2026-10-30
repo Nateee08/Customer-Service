@@ -178,8 +178,7 @@ def intake_lookup(sheet, *, email, name, telephone, address, job_number=''):
         return {'record': None, 'job_numbers': []}
     # Include all exact customer/property job references, even when an older
     # duplicate client row has a different or missing email/phone value.
-    candidates = [r for r in records(sheet) if identity(r) == chosen and
-                  (not requested_job or norm(r.get('job_number', '')) == requested_job)]
+    candidates = [r for r in records(sheet) if identity(r) == chosen]
     # Duplicate client rows are harmless; conflicting name fields are not guessed.
     result = {}
     for key in ('name', 'first_name', 'last_name'):
@@ -187,5 +186,9 @@ def intake_lookup(sheet, *, email, name, telephone, address, job_number=''):
         if len({norm(v) for v in values}) > 1:
             return {'record': None, 'job_numbers': []}
         result[key] = sorted(values)[0] if values else ''
-    jobs = sorted({r['job_number'] for r in candidates if r.get('job_number')})
+    # Include this customer's other properties only with the same full name and
+    # the verified account email. A shared name/phone alone cannot expose jobs.
+    account_jobs = [r for r in records(sheet) if norm(r.get('name', '')) == chosen[0]
+                    and email and email.casefold() in emails(r.get('email', ''))]
+    jobs = sorted({r['job_number'] for r in candidates + account_jobs if r.get('job_number')})
     return {'record': result, 'job_numbers': jobs}

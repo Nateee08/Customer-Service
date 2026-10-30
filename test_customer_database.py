@@ -55,7 +55,7 @@ class InternalIntakeMatchingTests(unittest.TestCase):
   import copy
   s=sheet();another=copy.deepcopy(s['rows'][0]);another['cells'][3]['value']='456';another['cells'][0]['value']='old@example.com';s['rows'].append(another)
   self.assertEqual(self.lookup(s)['job_numbers'],['123','456'])
-  self.assertEqual(self.lookup(s,job_number='456')['job_numbers'],['456'])
+  self.assertEqual(self.lookup(s,job_number='456')['job_numbers'],['123','456'])
  def test_shared_household_phone_uses_name_to_disambiguate(self):
   import copy
   s=sheet();another=copy.deepcopy(s['rows'][0]);another['cells'][1]['value']='John';another['cells'][3]['value']='456';s['rows'].append(another)
