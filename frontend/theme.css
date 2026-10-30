@@ -238,3 +238,7 @@
 .care-dark .receipt-dialog p {color:#ddd;font-size:14px;line-height:1.8;}
 .care-dark .receipt-number {color:#fff;overflow-wrap:anywhere;}
 .care-dark .receipt-dialog .contact-actions {margin-top:24px;}
+
+.care-dark .ticket-status {display:flex;flex-direction:column;align-items:flex-end;gap:6px;}
+.care-dark .ticket-status-label {font-size:12px;font-weight:600;color:#ddd;}
+@media(max-width:760px){.care-dark .ticket-status {align-items:flex-start;}}
