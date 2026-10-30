@@ -36,3 +36,14 @@
 .customer-lookup{margin:0 0 24px;border:1px solid #d6e0e2;border-radius:14px;padding:20px;background:#f6f9f9}.customer-lookup legend{font-weight:650;padding:0 8px}.customer-lookup p{font-size:14px;color:#425862;line-height:1.6}
 .coverage-dates{padding:16px 0;border-bottom:1px solid #e3e7e8}.coverage-dates:last-of-type{border:0}
 @media(max-width:700px){.qa-document-dialog{padding:20px}.qa-paper-scroll{padding:8px}.qa-submit-bar{bottom:-20px}}
+
+/* Restored customer-supplied panorama, shown in full at every screen size. */
+.hero.hero-photo{display:block;min-height:0;background:#fffaf2;border:1px solid #e7e0d5}
+.hero-photo .overview-photo{display:block;width:100%;height:auto;aspect-ratio:1983/793;object-fit:contain}
+.hero-photo .hero-copy{width:100%;padding:25px 30px;display:flex;align-items:center;justify-content:space-between;gap:28px}
+.hero-photo .hero-intro{min-width:0;flex:1}
+.hero-photo h2{font-size:27px;line-height:1.25;letter-spacing:-.8px;margin:13px 0 10px;max-width:none}
+.hero-photo p{font-size:13px;max-width:600px;margin:0;line-height:1.7;padding:0}
+.hero-photo .hero-actions{flex-shrink:0;display:flex;flex-direction:column;align-items:center;gap:6px}
+@media(max-width:1100px){.hero-photo .hero-copy{align-items:flex-start;flex-direction:column;gap:16px}.hero-photo .hero-actions{flex-direction:row;flex-wrap:wrap;gap:16px}}
+@media(max-width:760px){.hero-photo .hero-copy{padding:22px}.hero-photo h2{font-size:26px}.hero-photo .hero-actions{width:100%}.hero-photo .hero-actions .black{padding:12px 15px}}
