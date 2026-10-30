@@ -1,5 +1,6 @@
 import os,json,base64,secrets,hashlib,time,datetime,smtplib,io,re,threading
 from zoneinfo import ZoneInfo
+from pathlib import Path
 from email.message import EmailMessage
 from urllib.parse import urlsplit
 from flask import Flask,request,jsonify,render_template,redirect,make_response,send_file,abort
@@ -55,7 +56,7 @@ def check_write():
 @app.after_request
 def headers(r):
  r.headers['X-Content-Type-Options']='nosniff';r.headers['Referrer-Policy']='same-origin';r.headers['X-Frame-Options']='DENY'
- if request.path.startswith(('/api','/login','/register','/staff','/forgot','/reset')):r.headers['Cache-Control']='no-store'
+ if request.path=='/' or request.path.startswith(('/api','/login','/register','/staff','/forgot','/reset')):r.headers['Cache-Control']='no-store'
  return r
 @app.errorhandler(413)
 def too_large(e):return jsonify(error='Attachments must total less than 20 MB.'),413
@@ -67,7 +68,9 @@ def problem(e):
  if request.path.startswith('/api/'):return jsonify(error=e.description),e.code
  return render_template('auth.html',title='Customer care',message=e.description,enabled=False,mode='login'),e.code
 @app.get('/')
-def home():return render_template('index.html')
+def home():
+ assets=b''.join((Path(app.root_path)/'static'/name).read_bytes() for name in ('portal.js','portal.css'))
+ return render_template('index.html',asset_version=hashlib.sha256(assets).hexdigest()[:16])
 @app.get('/healthz')
 def health():return {'status':'ok','storageConfigured':bool(engine)}
 @app.get('/api/me')
@@ -222,7 +225,7 @@ def _sync_ticket(tid):
    if matches:row=str(matches[0]['id'])
    else:
     parts=t['name'].strip().split(maxsplit=1)
-    vals={**t,'ticket':tid,'status':'000 - Intake','first_name':parts[0],'last_name':parts[1] if len(parts)>1 else '', 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystem: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
+    vals={**t,'ticket':tid,'status':'000 - Intake','first_name':parts[0],'last_name':parts[1] if len(parts)>1 else '', 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
    with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
   with engine.connect() as c:fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
@@ -252,6 +255,9 @@ def save_ticket():
    notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
   return {'message':'Your feedback has been saved.'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
+ categories=list(dict.fromkeys(x.strip() for x in f.getlist('category') if x.strip()))
+ if not categories or any(x not in ('Solar','Battery','Generac','Monitoring','Warranty','Other') for x in categories):abort(400,description='Select at least one valid system or service type.')
+ d['category']=', '.join(categories)
  if any(not d[k] or len(d[k])>(5000 if k=='description' else 300) for k in fields):abort(400,description='Please complete all fields and keep the description under 5,000 characters.')
  if f.get('ack')!='on':abort(400,description='Please acknowledge the service rates and policies.')
  uploads=[x for x in request.files.getlist('photos') if x.filename];stored=[];total=0

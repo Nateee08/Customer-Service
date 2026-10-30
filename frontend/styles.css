@@ -7,3 +7,5 @@
 .document-logo img{width:520px;height:auto;left:-154px;top:-79px;filter:brightness(1.3) contrast(1.25)}
 
 .document-logo{width:202px;height:42px;transform:none;mix-blend-mode:normal;background:transparent;display:flex;align-items:center}.document-logo img{position:static;width:100%;height:auto;max-width:100%;filter:none}.wifi-guide ol{padding-left:22px;line-height:1.8}.wifi-guide li{margin-bottom:8px}.wifi-guide a{text-decoration:underline}.wifi-guide .muted{line-height:1.6}
+
+.system-options{border:1px solid #ddd;border-radius:12px;padding:14px 16px;margin:16px 0}.system-options legend{font-weight:600;padding:0 5px}.system-options p{font-size:14px;margin:0 0 12px;color:#444}.system-options>div{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:12px}.system-options .check{margin:0;display:flex;align-items:center;gap:10px}.system-options input{width:18px;height:18px;flex-shrink:0}
