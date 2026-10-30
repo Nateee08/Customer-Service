@@ -117,3 +117,29 @@ def run_worker(engine, table, logger):
         except Exception:
             logger.warning('Email retry deferred; notifications remain saved')
         time.sleep(60)
+
+
+def send_account_email(recipient, subject, body):
+    """Transactional account mail only; never use the staff feedback recipient list."""
+    msg = EmailMessage()
+    msg['From'] = 'customerservice@hookedonsolar.com'
+    msg['To'] = recipient
+    msg['Subject'] = subject
+    msg.set_content(body)
+    if gmail_configured():
+        token = requests.post('https://oauth2.googleapis.com/token', data={
+            'client_id': os.environ['GOOGLE_CLIENT_ID'], 'client_secret': os.environ['GOOGLE_CLIENT_SECRET'],
+            'refresh_token': os.environ['GOOGLE_REFRESH_TOKEN'], 'grant_type': 'refresh_token'}, timeout=15)
+        token.raise_for_status()
+        r = requests.post('https://gmail.googleapis.com/gmail/v1/users/me/messages/send',
+            headers={'Authorization': 'Bearer ' + token.json()['access_token']},
+            json={'raw': base64.urlsafe_b64encode(msg.as_bytes()).decode('ascii')}, timeout=15)
+        r.raise_for_status()
+        return
+    if os.getenv('RESEND_API_KEY') and os.getenv('NOTIFICATION_FROM'):
+        r = requests.post('https://api.resend.com/emails',
+            headers={'Authorization': 'Bearer ' + os.environ['RESEND_API_KEY']},
+            json={'from':os.environ['NOTIFICATION_FROM'],'to':[recipient],'subject':subject,'text':body},timeout=15)
+        r.raise_for_status()
+        return
+    raise RuntimeError('Account email sender is not configured')

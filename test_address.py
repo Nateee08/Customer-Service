@@ -6,7 +6,7 @@ import app as care
 class AddressTests(unittest.TestCase):
  def test_full_address_delivery_and_validation(self):
   client=care.app.test_client()
-  client.post('/register',data={'name':'Address Test','email':'address@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
+  test_app.register_verified(client,data={'name':'Address Test','email':'address@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
   data={'name':'Address Test','phone':'5550100','address':'123 Service St','address2':'Unit 4 / PO Box 12','city':'Woodland','state':'ca','postal':'95695-1234','category':'Solar','subject':'Address test','description':'Test','ack':'on'}
   with patch.object(care,'sync_ticket',return_value=False):
    r=client.post('/api/portal',data=data,headers={'Origin':'http://localhost'})

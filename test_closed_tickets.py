@@ -7,13 +7,13 @@ import app as care
 class ClosedTicketsTests(unittest.TestCase):
  def test_closed_variants_cached_outage_and_reopening(self):
   client=care.app.test_client()
-  client.post('/register',data={'name':'Closed Test','email':'closed@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
+  test_app.register_verified(client,data={'name':'Closed Test','email':'closed@test.invalid','password':'test-password-1234'},headers={'Origin':'http://localhost'})
   with patch.object(care,'smartsheet_config',return_value=None):
    response=client.post('/api/portal',data={'name':'Closed Test','phone':'5550100','city':'Woodland','state':'CA','postal':'95695','address':'Service address','category':'Solar','subject':'Completed work','description':'Test','ack':'on'},headers={'Origin':'http://localhost'})
   tid=response.json['id']
   with care.engine.begin() as c:c.execute(care.update(care.tickets).where(care.tickets.c.id==tid).values(row_id='123'))
   cfg=('secret','sheet',{'status':55,'manager':999})
-  with patch.object(care,'smartsheet_config',return_value=cfg):
+  with patch.object(care,'smartsheet_config',return_value=cfg), patch.object(care,'refresh_warranties'):
    for status in ['030 - Closed','031 - Closed Phone Support','032 - Closed Text Support','CLOSED','closed - resolved','Completed','040 - Completed','COMPLETE']:
     r=Mock();r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':status}]}]}
     with patch.object(care,'smart_request',return_value=r):

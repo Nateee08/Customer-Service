@@ -10,16 +10,23 @@ from sqlalchemy.exc import IntegrityError
 import requests
 import notifications
 import qa_pdf
+import account_security
+import customer_database
+import warranty_dates
+import sys
 app=Flask(__name__)
 app.config['MAX_CONTENT_LENGTH']=22*1024*1024
 meta=MetaData()
 email_outbox=notifications.define_table(meta)
 users=Table('care_users',meta,Column('id',String,primary_key=True),Column('email',String,unique=True,nullable=False),Column('name',String,nullable=False),Column('password',Text,nullable=False),Column('admin',Integer,nullable=False,default=0),Column('plan',String,nullable=False,default='None'),Column('membership_start',String),Column('membership_end',String),Column('minutes_used',Integer,nullable=False,default=0),Column('completion_date',String))
-sessions=Table('care_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
+sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
+ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
+warranties=Table('care_workmanship_dates',meta,Column('ticket_id',String,primary_key=True),Column('user_id',String,nullable=False),Column('started_at',String,nullable=False),Column('checked_version',String))
 closures=Table('care_ticket_closures',meta,Column('ticket_id',String,primary_key=True),Column('closed_at',Integer,nullable=False))
 files=Table('care_files',meta,Column('id',String,primary_key=True),Column('ticket_id',String,nullable=False),Column('user_id',String,nullable=False),Column('name',String),Column('type',String),Column('data',LargeBinary),Column('synced',Integer,default=0))
 reviews=Table('care_reviews',meta,Column('id',String,primary_key=True),Column('ticket_id',String),Column('user_id',String),Column('data',Text),Column('created',String))
+challenges=account_security.define_table(meta)
 resets=Table('care_resets',meta,Column('token',String,primary_key=True),Column('user_id',String),Column('expires',Integer))
 limits=Table('care_limits',meta,Column('key',String,primary_key=True),Column('count',Integer,nullable=False))
 url=os.getenv('DATABASE_URL','')
@@ -31,6 +38,7 @@ engine=create_engine(url,pool_pre_ping=True) if url else None
 if engine:meta.create_all(engine)
 DOCS=json.load(open(os.path.join(os.path.dirname(__file__),'documents.json')))
 def digest(s):return hashlib.sha256(s.encode()).hexdigest()
+def secure_cookies():return bool(os.getenv('RENDER'))
 def now():return datetime.datetime.now(datetime.timezone.utc).isoformat()
 def db_required():
  if engine is None:abort(503,description='Customer accounts are not enabled yet. Durable storage must be connected first.')
@@ -58,7 +66,7 @@ def check_write():
 @app.after_request
 def headers(r):
  r.headers['X-Content-Type-Options']='nosniff';r.headers['Referrer-Policy']='same-origin';r.headers['X-Frame-Options']='DENY'
- if request.path=='/' or request.path.startswith(('/api','/login','/register','/staff','/forgot','/reset')):r.headers['Cache-Control']='no-store'
+ if request.path=='/' or request.path.startswith(('/api','/login','/register','/staff','/forgot','/reset','/verify-account')):r.headers['Cache-Control']='no-store'
  return r
 @app.errorhandler(413)
 def too_large(e):return jsonify(error='Attachments must total less than 20 MB.'),413
@@ -104,7 +112,7 @@ def auth_view(mode,message='',status=200):
 def auth():
  mode='register' if request.path=='/register' else 'login'
  if request.method=='GET':return auth_view(mode)
- db_required();email=request.form.get('email','').strip().lower();password=request.form.get('password','');rate('auth:'+email)
+ db_required();rate('auth-origin:'+str(request.remote_addr),100);email=request.form.get('email','').strip().lower();password=request.form.get('password','');rate('auth:'+email)
  if not re.fullmatch(r'[^\s@]+@[^\s@]+\.[^\s@]+',email) or len(email)>254 or not 12<=len(password)<=128:return auth_view(mode,'Use a valid email and a password of 12–128 characters.',400)
  with engine.begin() as c:
   u=c.execute(select(users).where(users.c.email==email)).mappings().first()
@@ -118,8 +126,7 @@ def auth():
   else:
    if not u or not check_password_hash(u['password'],password):return auth_view(mode,'Email or password is incorrect.',400)
    uid=u['id']
-  token=secrets.token_urlsafe(32);c.execute(insert(sessions).values(token=digest(token),user_id=uid,expires=int(time.time())+86400*7))
- r=redirect('/');r.set_cookie('care_session',token,httponly=True,secure=bool(os.getenv('RENDER')),samesite='Lax',max_age=86400*7);return r
+ return start_verification(uid,email)
 @app.get('/logout')
 def logout():
  if engine:
@@ -129,16 +136,14 @@ def logout():
 def forgot():
  if request.method=='GET':return auth_view('forgot')
  db_required()
- if not os.getenv('SMTP_HOST') or not os.getenv('PUBLIC_URL'):return auth_view('forgot','Password reset email is not configured yet. Please contact customer service.',503)
+ if not notifications.configured() or not os.getenv('PUBLIC_URL'):return auth_view('forgot','Password reset email is not configured yet. Please contact customer service.',503)
  email=request.form.get('email','').strip().lower();rate('reset:'+email,3)
  with engine.begin() as c:
   u=c.execute(select(users).where(users.c.email==email)).mappings().first()
   if u:
    token=secrets.token_urlsafe(32);c.execute(insert(resets).values(token=digest(token),user_id=u['id'],expires=int(time.time())+1800))
-   msg=EmailMessage();msg['Subject']='Reset your Hooked on Solar password';msg['From']=os.getenv('SMTP_FROM',os.getenv('SMTP_USER'));msg['To']=email;msg.set_content('Use this link within 30 minutes to reset your password:\n'+os.environ['PUBLIC_URL'].rstrip('/')+'/reset-password/'+token)
    try:
-    with smtplib.SMTP(os.environ['SMTP_HOST'],int(os.getenv('SMTP_PORT','587')),timeout=15) as smtp:
-     smtp.starttls();smtp.login(os.environ['SMTP_USER'],os.environ['SMTP_PASSWORD']);smtp.send_message(msg)
+    notifications.send_account_email(email,'Reset your Hooked on Solar password','Use this link within 30 minutes to reset your password:\n'+os.environ['PUBLIC_URL'].rstrip('/')+'/reset-password/'+token)
    except Exception:return auth_view('forgot','Reset email could not be sent. Please contact customer service.',503)
  return auth_view('forgot','If that account exists, a reset link has been sent.')
 @app.route('/reset-password/<token>',methods=['GET','POST'])
@@ -150,7 +155,7 @@ def reset(token):
   if request.method=='GET':return auth_view('reset')
   password=request.form.get('password','')
   if not 12<=len(password)<=128:return auth_view('reset','Use 12–128 characters.',400)
-  c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']))
+  c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']));c.execute(delete(challenges).where(challenges.c.user_id==row['user_id']))
  return redirect('/login')
 _intake_lock=threading.RLock()
 _intake_columns=None
@@ -181,6 +186,8 @@ def smartsheet_config():
      added=r.json()['result'];columns.extend(added)
      by_title.update({c['title'].strip().casefold():c for c in added})
     mapping[key]=title
+   job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in ('job','jobnumber')),None)
+   if job_title:mapping['job_number']=job_title
    manager_title=next((col['title'] for col in columns if re.match(r'^manager\b',col['title'].strip(),re.I)),None)
    if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
@@ -193,6 +200,35 @@ def smartsheet_config():
 
 def smart_request(method,path,**kwargs):
  cfg=smartsheet_config();return requests.request(method,'https://api.smartsheet.com/2.0/sheets/'+cfg[1]+path,headers={'Authorization':'Bearer '+cfg[0],**kwargs.pop('headers',{})},timeout=15,**kwargs)
+_warranty_lock=threading.Lock()
+def refresh_warranties(sheet_data,cfg,owned):
+ if not _warranty_lock.acquire(blocking=False):return
+ try:
+  by_id={str(row['id']):row for row in sheet_data.get('rows',[])}
+  for t in owned:
+   row=by_id.get(t['row_id'])
+   if not row:continue
+   status=next((cell.get('value') for cell in row.get('cells',[]) if str(cell['columnId'])==str(cfg[2]['status'])),None)
+   if not warranty_dates.is_closed(status):continue
+   version=str(row.get('modifiedAt') or sheet_data.get('version') or '')
+   with engine.connect() as c:previous=c.execute(select(warranties).where(warranties.c.ticket_id==t['id'])).mappings().first()
+   if previous and version and previous['checked_version']==version:continue
+   try:
+    response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'includeAll':'true'},timeout=5)
+    response.raise_for_status();start=warranty_dates.closure_timestamp(response.json())
+    if not start:continue
+    with engine.begin() as c:
+     values=dict(user_id=t['user_id'],started_at=start,checked_version=version)
+     if previous:c.execute(update(warranties).where(warranties.c.ticket_id==t['id']).values(**values))
+     else:c.execute(insert(warranties).values(ticket_id=t['id'],**values))
+     actual=int(datetime.datetime.fromisoformat(start).timestamp())
+     existing=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
+     if existing is None:c.execute(insert(closures).values(ticket_id=t['id'],closed_at=actual))
+     else:c.execute(update(closures).where(closures.c.ticket_id==t['id']).values(closed_at=actual))
+   except (requests.RequestException,ValueError,KeyError):
+    app.logger.warning('Exact closure time unavailable for ticket %s; warranty date not estimated',t['id'])
+ finally:_warranty_lock.release()
+
 @app.get('/api/portal')
 def portal():
  u=required();cfg=smartsheet_config();rows=[];connected=False
@@ -201,6 +237,9 @@ def portal():
    r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();sheet_data=r.json();rows=sheet_data.get('rows');connected=isinstance(rows,list) and len(rows)>=sheet_data.get('totalRowCount',len(rows) if isinstance(rows,list) else 0)
    if not connected:rows=[]
   except requests.RequestException:pass
+ if connected:
+  with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.user_id==u['id'])).mappings())
+  threading.Thread(target=refresh_warranties,args=(sheet_data,cfg,owned),daemon=True).start()
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
   active=[]
@@ -238,8 +277,9 @@ def portal():
     c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
+ with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
- return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
+ return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
 
 def sync_ticket(tid):
  with _intake_lock:return _sync_ticket(tid)
@@ -255,8 +295,22 @@ def _sync_ticket(tid):
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
+    with engine.connect() as c:job_number=c.execute(select(ticket_details.c.job_number).where(ticket_details.c.ticket_id==tid)).scalar()
+    matched=None;related_jobs=[]
+    try:
+     sheet=customer_database.get_sheet()
+     related_jobs=customer_database.related_job_numbers(sheet,t['email'],t['name'],t['address'])
+     matched=customer_database.match(sheet,t['email'],'job_number',job_number) if job_number else customer_database.match(sheet,t['email'])
+     if not matched and not job_number:matched=customer_database.match(sheet,t['email'],'phone',t['phone'])
+     if not matched and not job_number:matched=customer_database.match(sheet,t['email'],'name',t['name'])
+    except (requests.RequestException,RuntimeError,ValueError,KeyError):
+     app.logger.warning('Client database matching unavailable; submitted details retained')
+    if matched:
+     t['name']=matched.get('name') or t['name'];t['phone']=matched.get('phone') or t['phone']
+     t['address']=customer_database.intake_address(matched) or t['address']
+     job_number=matched.get('job_number') or job_number
     parts=t['name'].strip().split(maxsplit=1)
-    vals={**t,'ticket':tid,'status':'000 - Intake','first_name':parts[0],'last_name':parts[1] if len(parts)>1 else '', 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
+    vals={**t,'job_number':job_number,'ticket':tid,'status':'000 - Intake','first_name':(matched or {}).get('first_name') or parts[0],'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''), 'date_realized':datetime.datetime.fromisoformat(t['created']).astimezone(ZoneInfo('America/Los_Angeles')).date().isoformat(), 'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nWebsite ticket: '+tid+('\n\nClient database job references for this customer and address: '+', '.join(related_jobs) if related_jobs else '')};cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
    with engine.begin() as c:c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
   with engine.connect() as c:fs=list(c.execute(select(files).where(files.c.ticket_id==tid,files.c.synced==0)).mappings())
@@ -324,6 +378,7 @@ def save_ticket():
  tid='HOS-'+secrets.token_hex(6).upper()
  with engine.begin() as c:
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
+  c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
  _intake_wake.set()
  return {'id':tid,'ticket':dict(id=tid,created=now(),status='Saved • delivering to service team',files=[],**d),'message':'Your ticket is saved. Delivery to the service team is continuing in the background.'}
@@ -371,12 +426,24 @@ def retry_pending_intake():
      pending=set(c.execute(select(tickets.c.id).where(tickets.c.row_id.is_(None))).scalars())
      pending.update(c.execute(select(files.c.ticket_id).where(files.c.synced==0)).scalars())
     for tid in sorted(pending):sync_ticket(tid)
+    cfg=smartsheet_config()
+    snapshot=smart_request('GET','',params={'includeAll':'true'});snapshot.raise_for_status()
+    with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None))).mappings())
+    refresh_warranties(snapshot.json(),cfg,owned)
   except Exception:
    app.logger.warning('Intake retry deferred; requests remain saved')
   _intake_wake.wait(60)
   _intake_wake.clear()
+def check_client_database():
+ try:
+  sheet=customer_database.get_sheet()
+  app.logger.warning('Client intake database accessible; columns: %s', ', '.join(col['title'] for col in sheet.get('columns',[])))
+ except (requests.RequestException,RuntimeError,ValueError,KeyError):
+  app.logger.warning('Client intake database unavailable: API account must have access to the configured client sheet')
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
+ threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
 if os.getenv('RENDER') and notifications.configured():
  threading.Thread(target=notifications.run_worker,args=(engine,email_outbox,app.logger),name='staff-email',daemon=True).start()
+account_security.install(sys.modules[__name__])
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))

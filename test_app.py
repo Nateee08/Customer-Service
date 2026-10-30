@@ -1,9 +1,18 @@
 import os,tempfile,unittest,io
 _tmp=tempfile.TemporaryDirectory();os.environ['DATABASE_URL']='sqlite:///'+_tmp.name+'/test.db';os.environ.pop('RENDER',None)
 import app as care
+from unittest.mock import patch
+import re
+def register_verified(client, **kwargs):
+ with patch('notifications.send_account_email') as sender:
+  response=client.post('/register',**kwargs)
+ if response.status_code==302:
+  code=re.search(r'code is: (\d{8})',sender.call_args.args[2]).group(1)
+  return client.post('/verify-account',data={'code':code},headers={'Origin':'http://localhost'})
+ return response
 class PortalTests(unittest.TestCase):
  def setUp(self):self.a=care.app.test_client();self.b=care.app.test_client()
- def register(self,c,email):return c.post('/register',data={'name':'Test User','email':email,'password':'safe-test-password-123'},headers={'Origin':'http://localhost'})
+ def register(self,c,email):return register_verified(c,data={'name':'Test User','email':email,'password':'safe-test-password-123'},headers={'Origin':'http://localhost'})
  def test_accounts_and_ticket_isolation(self):
   self.assertEqual(self.register(self.a,'one@test.invalid').status_code,302)
   self.assertEqual(self.register(self.b,'two@test.invalid').status_code,302)

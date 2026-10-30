@@ -6,7 +6,7 @@ import app as care
 class QaWorkflowTests(unittest.TestCase):
  def test_fast_save_and_closed_only_qa(self):
   client=care.app.test_client()
-  client.post('/register',data={'name':'QA Test','email':'qa-flow@test.invalid','password':'test-password-123'},headers={'Origin':'http://localhost'})
+  test_app.register_verified(client,data={'name':'QA Test','email':'qa-flow@test.invalid','password':'test-password-123'},headers={'Origin':'http://localhost'})
   headers={'Origin':'http://localhost'}
   with patch.object(care,'sync_ticket') as sync:
    r=client.post('/api/portal',data={'name':'QA Test','phone':'5550100','address':'Test address','city':'Woodland','state':'CA','postal':'95695','category':'Solar','subject':'QA work','description':'Test','ack':'on'},headers=headers)
