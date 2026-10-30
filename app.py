@@ -94,6 +94,8 @@ def problem(e):
 def home():
  assets=b''.join((Path(app.root_path)/'static'/name).read_bytes() for name in ('portal.js','portal.css'))
  return render_template('index.html',asset_version=hashlib.sha256(assets).hexdigest()[:16])
+@app.get('/favicon.ico')
+def favicon():return send_file(Path(app.static_folder)/'favicon.ico',mimetype='image/vnd.microsoft.icon',max_age=86400)
 @app.get('/healthz')
 def health():return {'status':'ok','storageConfigured':bool(engine)}
 @app.get('/api/me')
