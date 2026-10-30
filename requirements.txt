@@ -3,3 +3,5 @@ gunicorn>=23,<24
 SQLAlchemy>=2.0,<3
 psycopg[binary]>=3.2,<4
 requests>=2.32,<3
+pypdf>=6,<7
+reportlab>=4,<5

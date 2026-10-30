@@ -20,7 +20,7 @@ class QaWorkflowTests(unittest.TestCase):
   with patch.object(care.notifications,'configured',return_value=False):
    self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,200)
   with care.engine.connect() as c:
-   row=c.execute(care.select(care.email_outbox).where(care.email_outbox.c.subject=='Quality Assurance Form | '+tid)).mappings().one()
-   self.assertIn('alec@hookedonsolar.com',row['recipients']);self.assertIn('customerservice@hookedonsolar.com',row['recipients']);self.assertIn('QA notes',row['body'])
+   row=c.execute(care.select(care.email_outbox).where(care.email_outbox.c.subject=='Customer feedback - QA Test - '+tid)).mappings().one()
+   self.assertIn('alec@hookedonsolar.com',row['recipients']);self.assertIn('customerservice@hookedonsolar.com',row['recipients']);self.assertIn('qa_pdf',row['body'])
   with care.engine.begin() as c:c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-259201))
   self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,400)

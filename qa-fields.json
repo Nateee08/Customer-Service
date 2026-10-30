@@ -1,0 +1,414 @@
+[
+  {
+    "name": "customerName",
+    "x": 285,
+    "y": 263,
+    "w": 451,
+    "h": 24,
+    "kind": "text",
+    "required": true,
+    "label": "Client signature / customer full name"
+  },
+  {
+    "name": "signatureDate",
+    "x": 795,
+    "y": 260,
+    "w": 151,
+    "h": 22,
+    "kind": "text",
+    "required": true,
+    "label": "Date (MM/DD/YYYY)"
+  },
+  {
+    "name": "Service technician",
+    "x": 367,
+    "y": 315,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Exceeds",
+    "label": "Service technician score: Exceeds",
+    "required": true
+  },
+  {
+    "name": "Service technician",
+    "x": 531,
+    "y": 315,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Meets",
+    "label": "Service technician score: Meets",
+    "required": true
+  },
+  {
+    "name": "Service technician",
+    "x": 669,
+    "y": 315,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Could do better",
+    "label": "Service technician score: Could do better",
+    "required": true
+  },
+  {
+    "name": "Service department",
+    "x": 367,
+    "y": 362,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Exceeds",
+    "label": "Service department score: Exceeds",
+    "required": true
+  },
+  {
+    "name": "Service department",
+    "x": 531,
+    "y": 362,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Meets",
+    "label": "Service department score: Meets",
+    "required": true
+  },
+  {
+    "name": "Service department",
+    "x": 669,
+    "y": 362,
+    "w": 16,
+    "h": 16,
+    "kind": "radio",
+    "value": "Could do better",
+    "label": "Service department score: Could do better",
+    "required": true
+  },
+  {
+    "name": "Notified on the way",
+    "x": 113,
+    "y": 450,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Problem identified",
+    "x": 113,
+    "y": 493,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Problem fixed or explained",
+    "x": 113,
+    "y": 535,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Safety check",
+    "x": 113,
+    "y": 577,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Job number",
+    "x": 154,
+    "y": 596,
+    "w": 200,
+    "h": 20,
+    "kind": "text"
+  },
+  {
+    "name": "serviceDate",
+    "x": 221,
+    "y": 631,
+    "w": 170,
+    "h": 23,
+    "kind": "text",
+    "required": true,
+    "label": "Service date (MM/DD/YYYY)"
+  },
+  {
+    "name": "discipline_Solar",
+    "x": 738,
+    "y": 624,
+    "w": 18,
+    "h": 16,
+    "kind": "checkbox",
+    "label": "Solar"
+  },
+  {
+    "name": "discipline_Battery",
+    "x": 858,
+    "y": 624,
+    "w": 18,
+    "h": 16,
+    "kind": "checkbox",
+    "label": "Battery"
+  },
+  {
+    "name": "discipline_Generac",
+    "x": 963,
+    "y": 624,
+    "w": 18,
+    "h": 16,
+    "kind": "checkbox",
+    "label": "Generac"
+  },
+  {
+    "name": "Service technician name",
+    "x": 254,
+    "y": 674,
+    "w": 274,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Completion date",
+    "x": 705,
+    "y": 668,
+    "w": 144,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Reschedule",
+    "x": 995,
+    "y": 671,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Punch list 1",
+    "x": 145,
+    "y": 735,
+    "w": 525,
+    "h": 43,
+    "kind": "textarea"
+  },
+  {
+    "name": "Item 1 name",
+    "x": 682,
+    "y": 735,
+    "w": 188,
+    "h": 18,
+    "kind": "text"
+  },
+  {
+    "name": "Item 1 minutes",
+    "x": 757,
+    "y": 758,
+    "w": 38,
+    "h": 17,
+    "kind": "text"
+  },
+  {
+    "name": "Item 1 completion",
+    "x": 886,
+    "y": 735,
+    "w": 152,
+    "h": 25,
+    "kind": "text"
+  },
+  {
+    "name": "Punch list 2",
+    "x": 145,
+    "y": 786,
+    "w": 525,
+    "h": 43,
+    "kind": "textarea"
+  },
+  {
+    "name": "Item 2 name",
+    "x": 682,
+    "y": 786,
+    "w": 188,
+    "h": 18,
+    "kind": "text"
+  },
+  {
+    "name": "Item 2 minutes",
+    "x": 757,
+    "y": 809,
+    "w": 38,
+    "h": 17,
+    "kind": "text"
+  },
+  {
+    "name": "Item 2 completion",
+    "x": 886,
+    "y": 786,
+    "w": 152,
+    "h": 25,
+    "kind": "text"
+  },
+  {
+    "name": "Punch list 3",
+    "x": 145,
+    "y": 840,
+    "w": 525,
+    "h": 52,
+    "kind": "textarea"
+  },
+  {
+    "name": "Item 3 name",
+    "x": 682,
+    "y": 840,
+    "w": 188,
+    "h": 18,
+    "kind": "text"
+  },
+  {
+    "name": "Item 3 minutes",
+    "x": 757,
+    "y": 863,
+    "w": 38,
+    "h": 17,
+    "kind": "text"
+  },
+  {
+    "name": "Item 3 completion",
+    "x": 886,
+    "y": 840,
+    "w": 152,
+    "h": 25,
+    "kind": "text"
+  },
+  {
+    "name": "Punch list 4",
+    "x": 145,
+    "y": 910,
+    "w": 525,
+    "h": 52,
+    "kind": "textarea"
+  },
+  {
+    "name": "Item 4 name",
+    "x": 682,
+    "y": 910,
+    "w": 188,
+    "h": 18,
+    "kind": "text"
+  },
+  {
+    "name": "Item 4 minutes",
+    "x": 757,
+    "y": 933,
+    "w": 38,
+    "h": 17,
+    "kind": "text"
+  },
+  {
+    "name": "Item 4 completion",
+    "x": 886,
+    "y": 910,
+    "w": 152,
+    "h": 25,
+    "kind": "text"
+  },
+  {
+    "name": "Parts available",
+    "x": 107,
+    "y": 1023,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "Other service issue",
+    "x": 107,
+    "y": 1057,
+    "w": 18,
+    "h": 18,
+    "kind": "checkbox"
+  },
+  {
+    "name": "notes",
+    "x": 100,
+    "y": 1081,
+    "w": 935,
+    "h": 159,
+    "kind": "textarea",
+    "label": "Notes on job"
+  },
+  {
+    "name": "Other completion item 1",
+    "x": 110,
+    "y": 1289,
+    "w": 415,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Scheduled completion 1",
+    "x": 539,
+    "y": 1289,
+    "w": 332,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Initials 1",
+    "x": 889,
+    "y": 1289,
+    "w": 149,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Other completion item 2",
+    "x": 110,
+    "y": 1320,
+    "w": 415,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Scheduled completion 2",
+    "x": 539,
+    "y": 1320,
+    "w": 332,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Initials 2",
+    "x": 889,
+    "y": 1320,
+    "w": 149,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Other completion item 3",
+    "x": 110,
+    "y": 1348,
+    "w": 415,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Scheduled completion 3",
+    "x": 539,
+    "y": 1348,
+    "w": 332,
+    "h": 22,
+    "kind": "text"
+  },
+  {
+    "name": "Initials 3",
+    "x": 889,
+    "y": 1348,
+    "w": 149,
+    "h": 22,
+    "kind": "text"
+  }
+]

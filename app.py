@@ -9,6 +9,7 @@ from sqlalchemy import create_engine,MetaData,Table,Column,String,Integer,Text,L
 from sqlalchemy.exc import IntegrityError
 import requests
 import notifications
+import qa_pdf
 app=Flask(__name__)
 app.config['MAX_CONTENT_LENGTH']=22*1024*1024
 meta=MetaData()
@@ -81,6 +82,7 @@ def me():
 def document(name):
  if name not in DOCS:abort(404)
  with open(os.path.join(os.path.dirname(__file__),DOCS[name])) as f:data=base64.b64decode(f.read())
+ if name=='quality-assurance.pdf':data=qa_pdf.template()
  return send_file(io.BytesIO(data),mimetype='application/pdf',download_name=name,as_attachment=request.args.get('download')=='1')
 def rate(key,max_count=10):
  bucket=str(int(time.time())//900);key=digest(key+bucket)
@@ -268,6 +270,12 @@ def _sync_ticket(tid):
   app.logger.warning('Smartsheet delivery pending for ticket %s; HTTP status %s',tid,getattr(response,'status_code','unavailable'))
   # Attachment retries must not overwrite completed/deleted status.
   return False
+@app.get('/qa/background')
+def qa_background():
+ return send_file(io.BytesIO(base64.b64decode((Path(__file__).parent/'pdf-data/qa-background.b64').read_text())),mimetype='image/jpeg')
+@app.get('/qa/template')
+def qa_template():
+ return send_file(io.BytesIO(qa_pdf.template()),mimetype='application/pdf',download_name='Quality-Assurance-Form.pdf')
 @app.post('/api/portal')
 def save_ticket():
  u=required();rate('ticket:'+u['id'],15);f=request.form
@@ -282,14 +290,17 @@ def save_ticket():
    if any(not f.get(k,'').strip() for k in ('serviceDate','customerName','signatureDate')) or any(f.get(k) not in ('Exceeds','Meets','Could do better') for k in ('Service technician','Service department')):
     abort(400,description='Complete the service date, both ratings, client signature, and signature date.')
    for k in ('serviceDate','signatureDate'):
-    try:datetime.date.fromisoformat(f[k])
-    except ValueError:abort(400,description='Enter valid dates.')
+    try:datetime.datetime.strptime(f[k],'%m/%d/%Y') if '/' in f[k] else datetime.date.fromisoformat(f[k])
+    except ValueError:abort(400,description='Enter dates as MM/DD/YYYY.')
    data=json.dumps(f.to_dict())
    if len(data)>10000:abort(400,description='Please shorten your notes.')
    review_id=secrets.token_hex(16)
    c.execute(insert(reviews).values(id=review_id,user_id=u['id'],ticket_id=t.id,data=data,created=now()))
-   feedback='\n'.join(k+': '+f.get(k,'') for k in ('serviceDate','Service technician','Service department','Notified on the way','Problem identified','Problem fixed or explained','Safety check','Discipline','Service technician name','Completion date','Reschedule','Punch list 1','Punch list 2','Punch list 3','Punch list 4','Parts available','Other service issue','notes','Other completion items','customerName','signatureDate'))
-   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Quality Assurance Form | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
+   customer_name=' '.join(f['customerName'].split())[:100]
+   values=f.to_dict();values['Job number']=values.get('Job number') or t.id
+   pdf=qa_pdf.completed(values)
+   payload=json.dumps({'kind':'qa_pdf','pdf':base64.b64encode(pdf).decode(),'filename':'Customer-feedback-'+t.id+'.pdf'})
+   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback - '+customer_name+' - '+t.id,payload,u['email'])
   if notifications.configured():
    threading.Thread(target=notifications.deliver_pending,args=(engine,email_outbox,app.logger),daemon=True).start()
    return {'message':'Your completed QA form has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}

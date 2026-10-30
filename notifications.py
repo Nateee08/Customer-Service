@@ -43,11 +43,13 @@ def deliver_gmail(engine, table, rows, logger):
         msg['Reply-To'] = row['reply_to']
         msg['Subject'] = row['subject']
         msg['Message-ID'] = '<' + row['id'] + '@hookedonsolar.com>'
-        msg.set_content(row['body'])
-        if row['subject'].startswith('Quality Assurance Form | '):
-            form_html='<html><body><h1>Hooked on Solar — Quality Assurance Form</h1><table style="border-collapse:collapse">'+''.join('<tr><th style="text-align:left;padding:8px;border:1px solid #ddd">'+html.escape(line.partition(':')[0])+'</th><td style="padding:8px;border:1px solid #ddd;white-space:pre-wrap">'+html.escape(line.partition(':')[2])+'</td></tr>' for line in row['body'].splitlines())+'</table></body></html>'
-            msg.add_alternative(form_html, subtype='html')
-            msg.add_attachment(form_html.encode(),maintype='text',subtype='html',filename='Quality-Assurance-Form.html')
+        try:payload=json.loads(row['body'])
+        except (ValueError,TypeError):payload={}
+        if isinstance(payload,dict) and payload.get('kind')=='qa_pdf':
+            msg.set_content('')
+            msg.add_attachment(base64.b64decode(payload['pdf']),maintype='application',subtype='pdf',filename=payload['filename'])
+        else:
+            msg.set_content(row['body'])
         # Atomic claim across processes. Gmail does not support idempotent sends;
         # uncertain outcomes remain held for review instead of blind retries.
         with engine.begin() as conn:
@@ -92,10 +94,14 @@ def deliver_pending(engine, table, logger):
             with engine.begin() as conn:
                 conn.execute(update(table).where(table.c.id == row['id']).values(first_attempt=started))
             try:
+                try:payload=json.loads(row['body'])
+                except (ValueError,TypeError):payload={}
+                is_pdf=isinstance(payload,dict) and payload.get('kind')=='qa_pdf'
                 response = requests.post('https://api.resend.com/emails',
                     headers={'Authorization': 'Bearer ' + key, 'Idempotency-Key': row['id']},
                     json={'from': sender, 'to': [email for email in json.loads(row['recipients']) if email in RECIPIENTS],
-                          'subject': row['subject'], 'text': row['body'], 'reply_to': row['reply_to']}, timeout=15)
+                          'subject': row['subject'], 'text': '' if is_pdf else row['body'], 'reply_to': row['reply_to'],
+                          **({'attachments':[{'filename':payload['filename'],'content':payload['pdf']}]} if is_pdf else {})}, timeout=15)
                 response.raise_for_status()
                 provider_id = response.json()['id']
                 with engine.begin() as conn:
