@@ -13,6 +13,7 @@ import qa_pdf
 import account_security
 import customer_database
 import warranty_dates
+from sheet_snapshot import SheetSnapshot
 import sys
 app=Flask(__name__)
 app.config['MAX_CONTENT_LENGTH']=22*1024*1024
@@ -217,7 +218,24 @@ def smartsheet_config():
    return None
 
 def smart_request(method,path,**kwargs):
- cfg=smartsheet_config();return requests.request(method,'https://api.smartsheet.com/2.0/sheets/'+cfg[1]+path,headers={'Authorization':'Bearer '+cfg[0],**kwargs.pop('headers',{})},timeout=15,**kwargs)
+ cfg=smartsheet_config();return requests.request(method,'https://api.smartsheet.com/2.0/sheets/'+cfg[1]+path,headers={'Authorization':'Bearer '+cfg[0],**kwargs.pop('headers',{})},timeout=kwargs.pop('timeout',15),**kwargs)
+_portal_snapshot=SheetSnapshot()
+def load_portal_snapshot():
+ started=time.monotonic()
+ try:
+  cfg=smartsheet_config()
+  if not cfg:raise RuntimeError('Intake connection unavailable')
+  # Only rows already delivered before this read can be judged missing from it.
+  # This also protects a new ticket from an older cached or in-flight sheet read.
+  with engine.connect() as c:
+   known_rows=dict(c.execute(select(tickets.c.id,tickets.c.row_id).where(tickets.c.row_id.is_not(None))).all())
+  r=smart_request('GET','',params={'includeAll':'true'},timeout=(3,6));r.raise_for_status()
+  sheet=r.json();rows=sheet.get('rows')
+  if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):raise ValueError('Incomplete intake sheet')
+  return dict(sheet=sheet,config=cfg,known_rows=known_rows,checked_at=now())
+ except Exception as exc:
+  app.logger.warning('Portal status refresh deferred after %.2fs (%s); saved tickets retained',time.monotonic()-started,type(exc).__name__)
+  raise
 _warranty_lock=threading.Lock()
 def refresh_warranties(sheet_data,cfg,owned):
  if not _warranty_lock.acquire(blocking=False):return
@@ -249,12 +267,11 @@ def refresh_warranties(sheet_data,cfg,owned):
 
 @app.get('/api/portal')
 def portal():
- u=required();cfg=smartsheet_config();rows=[];connected=False
- if cfg:
-  try:
-   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();sheet_data=r.json();rows=sheet_data.get('rows');connected=isinstance(rows,list) and len(rows)>=sheet_data.get('totalRowCount',len(rows) if isinstance(rows,list) else 0)
-   if not connected:rows=[]
-  except requests.RequestException:pass
+ u=required()
+ snapshot,connected,syncing=_portal_snapshot.get(load_portal_snapshot)
+ cfg=snapshot['config'] if snapshot else None
+ sheet_data=snapshot['sheet'] if snapshot else {}
+ rows=sheet_data.get('rows',[])
  if connected:
   with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.user_id==u['id'])).mappings())
   threading.Thread(target=refresh_warranties,args=(sheet_data,cfg,owned),daemon=True).start()
@@ -274,14 +291,15 @@ def portal():
      manager=', '.join(str(x.get('name') or x.get('email') or '') for x in obj.get('values',[]) if isinstance(x,dict)) or obj.get('name') or obj.get('email')
     t['manager']=str(manager) if manager else None
     t['managerAvailable']=manager_column is not None
-    if status:
+    if connected and status:
      t['status']=str(status)
      c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
-   elif connected and t['row_id']:
+   elif connected and t['row_id'] and snapshot['known_rows'].get(t['id'])==t['row_id']:
     # Only a successful, complete sheet read can establish that a synced row was deleted.
     t['status']='Deleted from Smartsheet'
     c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
    if t['status']=='Deleted from Smartsheet':continue
+   t['deliveryStatus']='delivered' if t['row_id'] else 'pending'
    closed='closed' in (t['status'] or '').casefold() or bool(re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()))
    if closed:
     closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
@@ -297,7 +315,7 @@ def portal():
    active.append(t)
  with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
  feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
- return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
+ return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
 
 def sync_ticket(tid,include_files=True):
  # Serialize row writes/reconciliation, but never keep a new row waiting for uploads.
