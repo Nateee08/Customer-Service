@@ -270,6 +270,18 @@ def refresh_warranties(sheet_data,cfg,owned):
     app.logger.warning('Exact closure time unavailable for ticket %s; warranty date not estimated',t['id'])
  finally:_warranty_lock.release()
 
+def saved_contact(user, previous):
+ contact={'name':user.get('name') or '', 'phone':'', 'address':'', 'address2':'', 'city':'', 'state':'', 'postal':''}
+ if not previous:return contact
+ contact.update(name=previous.get('name') or contact['name'],phone=previous.get('phone') or '')
+ lines=(previous.get('address') or '').splitlines()
+ if lines:
+  contact['address']=lines[0]
+  locality=re.fullmatch(r'(.+), ([A-Z]{2}) (\d{5}(?:-\d{4})?)',lines[-1])
+  if locality:
+   contact.update(city=locality[1],state=locality[2],postal=locality[3],address2='\n'.join(lines[1:-1]))
+ return contact
+
 @app.get('/api/portal')
 def portal():
  u=required()
@@ -305,6 +317,7 @@ def portal():
     c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
    if t['status']=='Deleted from Smartsheet':continue
    t['deliveryStatus']='delivered' if t['row_id'] else 'pending'
+   if not t['row_id']:t['status']='Saved • sending to service team'
    t['reference']=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==t['id'])).scalar()
    closed='closed' in (t['status'] or '').casefold() or bool(re.search(r'\bcomplet(?:e|ed)\b',(t['status'] or '').casefold()))
    if closed:
@@ -321,7 +334,7 @@ def portal():
    active.append(t)
  with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
  feedback_tickets=[{'id':t['id'],'reference':t['reference'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
- return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
+ return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,contact=saved_contact(u,ts[0] if ts else None),profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
 
 def sync_ticket(tid,include_files=True):
  # Serialize row writes/reconciliation, but never keep a new row waiting for uploads.
@@ -381,9 +394,18 @@ def intake_values(ticket, submitted_job='', client_sheet=None, reference=None, r
   'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite request ID: '+t['id']+('\n\nClient database job references: '+', '.join(related_jobs) if related_jobs else '')}
 
 def _sync_ticket(tid):
+ with engine.connect() as c:
+  t=dict(c.execute(select(tickets).where(tickets.c.id==tid)).mappings().one())
+  job_number=c.execute(select(ticket_details.c.job_number).where(ticket_details.c.ticket_id==tid)).scalar()
+  reference=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==tid)).scalar()
+ resolution=None
+ if not t['row_id']:
+  try:resolution=resolve_ticket_client(t,job_number,customer_database.get_sheet())
+  except (requests.RequestException,RuntimeError,ValueError,KeyError):
+   app.logger.warning('Client database matching unavailable; submitted details retained')
+  if not reference:reference=assign_ticket_number(t,resolution)
  cfg=smartsheet_config()
  if not cfg:return False
- with engine.connect() as c:t=dict(c.execute(select(tickets).where(tickets.c.id==tid)).mappings().one())
  row=t['row_id']
  try:
   if not row:
@@ -392,17 +414,6 @@ def _sync_ticket(tid):
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
-    with engine.connect() as c:job_number=c.execute(select(ticket_details.c.job_number).where(ticket_details.c.ticket_id==tid)).scalar()
-    sheet=None
-    try:
-     sheet=customer_database.get_sheet()
-    except (requests.RequestException,RuntimeError,ValueError,KeyError):
-     app.logger.warning('Client database matching unavailable; submitted details retained')
-    try:resolution=resolve_ticket_client(t,job_number,sheet)
-    except (RuntimeError,ValueError,KeyError):
-     app.logger.warning('Client database matching unavailable; submitted details retained')
-     resolution=None
-    reference=assign_ticket_number(t,resolution)
     vals=intake_values(t,job_number,reference=reference,resolution=resolution)
     cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
     r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
@@ -520,20 +531,34 @@ def save_ticket():
  if len(uploads)>5:abort(400,description='Attach up to 5 files.')
  for x in uploads:
   blob=x.read();total+=len(blob)
-  valid=(x.mimetype=='image/jpeg' and blob.startswith(b'\xff\xd8\xff')) or (x.mimetype=='image/png' and blob.startswith(b'\x89PNG\r\n\x1a\n')) or (x.mimetype=='application/pdf' and blob.startswith(b'%PDF-')) or (x.mimetype=='image/webp' and blob[:4]==b'RIFF' and blob[8:12]==b'WEBP')
-  if total>20*1024*1024 or not valid:abort(400,description='Use JPG, PNG, WebP or PDF files totaling at most 20 MB.')
+  valid=(Path(x.filename).suffix.lower() in ('.jpg','.jpeg') and x.mimetype=='image/jpeg' and blob.startswith(b'\xff\xd8\xff')) or (Path(x.filename).suffix.lower()=='.pdf' and x.mimetype=='application/pdf' and blob.startswith(b'%PDF-'))
+  if total>20*1024*1024 or not valid:abort(400,description='Photos must be JPEG/JPG. Documents must be PDF. Attach up to 5 files totaling at most 20 MB.')
   stored.append(dict(id=secrets.token_hex(16),user_id=u['id'],name=x.filename[:200],type=x.mimetype,data=blob,synced=0))
- tid='HOS-'+secrets.token_hex(6).upper()
+ request_key=f.get('request_key','').strip()
+ if request_key and not re.fullmatch(r'[A-Za-z0-9-]{20,80}',request_key):abort(400,description='Please reopen the request form and try again.')
+ tid='HOS-'+(hashlib.sha256((u['id']+':'+request_key).encode()).hexdigest()[:32].upper() if request_key else secrets.token_hex(6).upper())
  created_at=now()
- with engine.begin() as c:
-  c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • awaiting intake connection',**d))
-  c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
-  for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
- delivered=deliver_intake_now(tid)
- status='000 - Intake' if delivered else 'Saved • delivering to service team'
- message='Your ticket has been submitted to the service team.' if delivered else 'Your ticket is saved. Delivery to the service team is pending and will retry automatically. Please do not submit it again.'
- with engine.connect() as c:reference=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==tid)).scalar()
- return {'id':tid,'deliveryStatus':'delivered' if delivered else 'pending','ticket':dict(id=tid,reference=reference,created=created_at,status=status,files=[],**d),'message':message}
+ try:
+  with engine.begin() as c:
+   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • sending to service team',**d))
+   c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
+   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
+ except IntegrityError:
+  with engine.connect() as c:existing=c.execute(select(tickets.c.id).where(tickets.c.id==tid,tickets.c.user_id==u['id'])).scalar()
+  if not request_key or not existing:raise
+ deliver_intake_now(tid)
+ return submission_receipt(tid,u['id'])
+
+def submission_receipt(tid,user_id):
+ with engine.connect() as c:
+  t=dict(c.execute(select(tickets).where(tickets.c.id==tid,tickets.c.user_id==user_id)).mappings().one())
+  t['reference']=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==tid)).scalar()
+  t['files']=[{'key':x['id'],'name':x['name']} for x in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==tid,files.c.user_id==user_id)).mappings()]
+ delivered=bool(t.pop('row_id',None));t.pop('queue',None)
+ t['deliveryStatus']='delivered' if delivered else 'pending'
+ if not delivered:t['status']='Saved • sending to service team'
+ message='Your request has been received by our service team.' if delivered else 'Your request is safely saved. We are confirming delivery to our service team and will retry automatically. Please do not submit a second request.'
+ return {'id':tid,'deliveryStatus':t['deliveryStatus'],'ticket':t,'message':message}
 @app.get('/api/file')
 def file_download():
  u=required()
@@ -574,12 +599,17 @@ def retry_pending_intake():
  while True:
   try:
    if engine and smartsheet_config():
-    try:refresh_ticket_numbers()
-    except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
     with engine.connect() as c:
      pending=set(c.execute(select(tickets.c.id).where(tickets.c.row_id.is_(None))).scalars())
      pending.update(c.execute(select(files.c.ticket_id).where(files.c.synced==0)).scalars())
-    for tid in sorted(pending):sync_ticket(tid)
+    for tid in sorted(pending):
+     try:sync_ticket(tid,include_files=False)
+     except Exception:app.logger.warning('Intake retry deferred for request %s',tid)
+    for tid in sorted(pending):
+     try:sync_ticket_files(tid)
+     except Exception:app.logger.warning('Attachment retry deferred for request %s',tid)
+    try:refresh_ticket_numbers()
+    except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
     cfg=smartsheet_config()
     snapshot=smart_request('GET','',params={'includeAll':'true'});snapshot.raise_for_status()
     with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None))).mappings())

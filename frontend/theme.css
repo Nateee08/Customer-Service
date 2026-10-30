@@ -225,3 +225,16 @@
   .care-dark .topic-links svg { flex-shrink: 0; }
   .care-dark .dialog { margin-top: 5px; }
 }
+
+.care-dark .request-confirmation {padding:18px 20px;margin:20px 0;border:1px solid #66513d;border-left:4px solid #e87d31;border-radius:9px;background:#201b16;}
+.care-dark .request-confirmation strong {color:#fff;font-size:15px;}
+.care-dark .request-confirmation p {font-size:13px;margin:10px 0;line-height:1.7;}
+.care-dark .request-confirmation p:last-child {margin-bottom:0;}
+.care-dark .request-confirmation a {color:#ffb37e;text-decoration:underline;overflow-wrap:anywhere;}
+
+.care-dark .receipt-dialog {width:600px;border:1px solid #705034;}
+.care-dark .receipt-check {display:inline-grid;place-items:center;background:#bf4900;color:white;width:56px;height:56px;border-radius:8px;}
+.care-dark .receipt-dialog h2 {line-height:1.25;margin:20px 0;}
+.care-dark .receipt-dialog p {color:#ddd;font-size:14px;line-height:1.8;}
+.care-dark .receipt-number {color:#fff;overflow-wrap:anywhere;}
+.care-dark .receipt-dialog .contact-actions {margin-top:24px;}
