@@ -6,7 +6,7 @@ from urllib.parse import urlsplit
 from flask import Flask,request,jsonify,render_template,redirect,make_response,send_file,abort
 from werkzeug.security import generate_password_hash,check_password_hash
 from sqlalchemy import create_engine,MetaData,Table,Column,String,Integer,Text,LargeBinary,select,insert,update,delete,and_,func
-from sqlalchemy.exc import IntegrityError
+from sqlalchemy.exc import IntegrityError, SQLAlchemyError
 import requests
 import notifications
 import qa_pdf
@@ -27,6 +27,7 @@ closures=Table('care_ticket_closures',meta,Column('ticket_id',String,primary_key
 files=Table('care_files',meta,Column('id',String,primary_key=True),Column('ticket_id',String,nullable=False),Column('user_id',String,nullable=False),Column('name',String),Column('type',String),Column('data',LargeBinary),Column('synced',Integer,default=0))
 reviews=Table('care_reviews',meta,Column('id',String,primary_key=True),Column('ticket_id',String),Column('user_id',String),Column('data',Text),Column('created',String))
 challenges=account_security.define_table(meta)
+account_deliveries=account_security.define_delivery_table(meta)
 resets=Table('care_resets',meta,Column('token',String,primary_key=True),Column('user_id',String),Column('expires',Integer))
 limits=Table('care_limits',meta,Column('key',String,primary_key=True),Column('count',Integer,nullable=False))
 url=os.getenv('DATABASE_URL','')
@@ -34,7 +35,10 @@ if url.startswith('postgres://'):url=url.replace('postgres://','postgresql+psyco
 elif url.startswith('postgresql://'):url=url.replace('postgresql://','postgresql+psycopg://',1)
 if not url and os.getenv('DATA_DIR'):
  os.makedirs(os.environ['DATA_DIR'],exist_ok=True);url='sqlite:///'+os.path.join(os.environ['DATA_DIR'],'customer-care.db')
-engine=create_engine(url,pool_pre_ping=True) if url else None
+db_options={'pool_pre_ping':True}
+if url.startswith('postgresql'):
+ db_options.update(pool_timeout=5,connect_args={'connect_timeout':5,'options':'-c statement_timeout=10000 -c lock_timeout=5000'})
+engine=create_engine(url,**db_options) if url else None
 if engine:meta.create_all(engine)
 DOCS=json.load(open(os.path.join(os.path.dirname(__file__),'documents.json')))
 def digest(s):return hashlib.sha256(s.encode()).hexdigest()
@@ -70,6 +74,11 @@ def headers(r):
  return r
 @app.errorhandler(413)
 def too_large(e):return jsonify(error='Attachments must total less than 20 MB.'),413
+@app.errorhandler(SQLAlchemyError)
+def database_unavailable(e):
+ app.logger.error('Database request failed: %s',type(e).__name__)
+ if request.path.startswith('/api/'):return jsonify(error='The service is temporarily busy. Please try again shortly.'),503
+ return auth_view('login','The service is temporarily busy. Please try again shortly. Your account information is safe.',503)
 @app.errorhandler(401)
 @app.errorhandler(403)
 @app.errorhandler(400)
@@ -118,10 +127,13 @@ def auth():
   if mode=='register':
    name=request.form.get('name','').strip()
    if not name or len(name)>200:return auth_view(mode,'Please enter your name.',400)
-   if u:return auth_view(mode,'Unable to create this account. Try signing in or resetting your password.',400)
-   uid=secrets.token_hex(16)
-   try:c.execute(insert(users).values(id=uid,email=email,name=name,password=generate_password_hash(password),admin=0,plan='None',minutes_used=0))
-   except IntegrityError:return auth_view(mode,'Unable to create this account.',400)
+   if u:
+    if not check_password_hash(u['password'],password):return auth_view(mode,'Unable to create this account. Try signing in or resetting your password.',400)
+    uid=u['id']
+   else:
+    uid=secrets.token_hex(16)
+    try:c.execute(insert(users).values(id=uid,email=email,name=name,password=generate_password_hash(password),admin=0,plan='None',minutes_used=0))
+    except IntegrityError:return auth_view(mode,'Unable to create this account. Try signing in.',400)
   else:
    if not u or not check_password_hash(u['password'],password):return auth_view(mode,'Email or password is incorrect.',400)
    uid=u['id']
@@ -449,6 +461,7 @@ if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
 if os.getenv('RENDER') and notifications.configured():
+ threading.Thread(target=notifications.check_account_sender,args=(app.logger,),name='account-email-check',daemon=True).start()
  threading.Thread(target=notifications.run_worker,args=(engine,email_outbox,app.logger),name='staff-email',daemon=True).start()
 account_security.install(sys.modules[__name__])
 if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))

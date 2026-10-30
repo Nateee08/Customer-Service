@@ -4,6 +4,19 @@ from sqlalchemy import create_engine, MetaData, select
 import notifications as n
 
 class NotificationTests(unittest.TestCase):
+    def test_email_diagnostics_do_not_expose_response_contents(self):
+        response=Mock(status_code=400)
+        response.json.return_value={'error':'invalid_grant','error_description':'SECRET-CONTENT'}
+        error=n.requests.HTTPError('SECRET-CONTENT',response=response)
+        self.assertEqual(n.account_email_error(error),'email provider HTTP 400: invalid_grant')
+        response.json.return_value={'error':'SECRET-CONTENT'}
+        self.assertEqual(n.account_email_error(error),'email provider HTTP 400')
+    def test_sender_check_does_not_send_email(self):
+        response=Mock();response.json.return_value={'access_token':'private-test-token'}
+        with patch.dict(os.environ,{'GOOGLE_CLIENT_ID':'test','GOOGLE_CLIENT_SECRET':'test','GOOGLE_REFRESH_TOKEN':'test'},clear=True),patch.object(n.requests,'post',return_value=response) as post:
+            n.check_account_sender(Mock())
+            self.assertEqual(post.call_count,1)
+            self.assertEqual(post.call_args.args[0],'https://oauth2.googleapis.com/token')
     def setUp(self):
         self.engine=create_engine('sqlite://')
         self.meta=MetaData(); self.table=n.define_table(self.meta); self.meta.create_all(self.engine)
