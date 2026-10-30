@@ -1,5 +1,5 @@
 """Durable staff notifications; requires an authorized email sender before delivery."""
-import json, os, threading, time, base64
+import json, os, threading, time, base64, html
 from email.message import EmailMessage
 import requests
 from sqlalchemy import Table, Column, String, Text, Integer, select, insert, update
@@ -44,6 +44,10 @@ def deliver_gmail(engine, table, rows, logger):
         msg['Subject'] = row['subject']
         msg['Message-ID'] = '<' + row['id'] + '@hookedonsolar.com>'
         msg.set_content(row['body'])
+        if row['subject'].startswith('Quality Assurance Form | '):
+            form_html='<html><body><h1>Hooked on Solar — Quality Assurance Form</h1><table style="border-collapse:collapse">'+''.join('<tr><th style="text-align:left;padding:8px;border:1px solid #ddd">'+html.escape(line.partition(':')[0])+'</th><td style="padding:8px;border:1px solid #ddd;white-space:pre-wrap">'+html.escape(line.partition(':')[2])+'</td></tr>' for line in row['body'].splitlines())+'</table></body></html>'
+            msg.add_alternative(form_html, subtype='html')
+            msg.add_attachment(form_html.encode(),maintype='text',subtype='html',filename='Quality-Assurance-Form.html')
         # Atomic claim across processes. Gmail does not support idempotent sends;
         # uncertain outcomes remain held for review instead of blind retries.
         with engine.begin() as conn:
@@ -63,7 +67,7 @@ def deliver_gmail(engine, table, rows, logger):
             continue
         with engine.begin() as conn:
             conn.execute(update(table).where(table.c.id == row['id']).values(state='sent', provider_id=provider_id))
-        logger.info('Feedback email accepted: %s', row['id'])
+        logger.warning('Feedback email accepted: %s', row['id'])
 
 def deliver_pending(engine, table, logger):
     key, sender = os.getenv('RESEND_API_KEY'), os.getenv('NOTIFICATION_FROM')

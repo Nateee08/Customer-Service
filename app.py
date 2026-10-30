@@ -236,7 +236,7 @@ def portal():
     c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active]
+ feedback_tickets=[{'id':t['id'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,updatedAt=now() if connected else None)
 
 def sync_ticket(tid):
@@ -273,18 +273,27 @@ def save_ticket():
  u=required();rate('ticket:'+u['id'],15);f=request.form
  if f.get('action')=='review':
   with engine.begin() as c:
-   t=c.execute(select(tickets.c.id).where(tickets.c.id==f.get('ticketId'),tickets.c.user_id==u['id'])).first()
+   t=c.execute(select(tickets).where(tickets.c.id==f.get('ticketId'),tickets.c.user_id==u['id'])).first()
    if not t:abort(400,description='Select one of your tickets.')
+   closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t.id)).scalar()
+   status=(t.status or '').casefold()
+   if not ('closed' in status or re.search(r'\bcomplet(?:e|ed)\b',status)) or closed_at is None or time.time()>=closed_at+259200:
+    abort(400,description='The QA form is available only for closed tickets within three days of closure.')
+   if any(not f.get(k,'').strip() for k in ('serviceDate','customerName','signatureDate')) or any(f.get(k) not in ('Exceeds','Meets','Could do better') for k in ('Service technician','Service department')):
+    abort(400,description='Complete the service date, both ratings, client signature, and signature date.')
+   for k in ('serviceDate','signatureDate'):
+    try:datetime.date.fromisoformat(f[k])
+    except ValueError:abort(400,description='Enter valid dates.')
    data=json.dumps(f.to_dict())
    if len(data)>10000:abort(400,description='Please shorten your notes.')
    review_id=secrets.token_hex(16)
    c.execute(insert(reviews).values(id=review_id,user_id=u['id'],ticket_id=t.id,data=data,created=now()))
-   feedback='\n'.join(k+': '+f.get(k,'') for k in ('serviceDate','Service technician','Service department','notes','customerName'))
-   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Customer feedback | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
+   feedback='\n'.join(k+': '+f.get(k,'') for k in ('serviceDate','Service technician','Service department','Notified on the way','Problem identified','Problem fixed or explained','Safety check','Discipline','Service technician name','Completion date','Reschedule','Punch list 1','Punch list 2','Punch list 3','Punch list 4','Parts available','Other service issue','notes','Other completion items','customerName','signatureDate'))
+   notifications.enqueue(c,email_outbox,'feedback-'+review_id,'Quality Assurance Form | '+t.id,'Ticket: '+t.id+'\nCustomer: '+u['name']+'\nEmail: '+u['email']+'\n'+feedback,u['email'])
   if notifications.configured():
    threading.Thread(target=notifications.deliver_pending,args=(engine,email_outbox,app.logger),daemon=True).start()
-   return {'message':'Your feedback has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}
-  return {'message':'Your feedback has been saved. Email delivery is pending because the service team’s email connection is not yet enabled.','emailStatus':'not_configured'}
+   return {'message':'Your completed QA form has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}
+  return {'message':'Your completed QA form has been saved. Email delivery is pending because the service team’s email connection is not yet enabled.','emailStatus':'not_configured'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
  city=f.get('city','').strip();state=f.get('state','').strip().upper();postal=f.get('postal','').strip();address2=f.get('address2','').strip()
  if not d['address'] or len(d['address'])>150 or not city or len(city)>100 or not re.fullmatch(r'[A-Z]{2}',state) or not re.fullmatch(r'\d{5}(?:-\d{4})?',postal) or len(address2)>150:abort(400,description='Enter the full address, including city, two-letter state, and ZIP code.')
@@ -305,8 +314,8 @@ def save_ticket():
  with engine.begin() as c:
   c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=now(),status='Saved • awaiting intake connection',**d))
   for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
- synced=sync_ticket(tid)
- return {'id':tid,'message':'Ticket submitted to the service intake team.' if synced else 'Request saved securely. Delivery to the service intake team is pending.'}
+ _intake_wake.set()
+ return {'id':tid,'ticket':dict(id=tid,created=now(),status='Saved • delivering to service team',files=[],**d),'message':'Your ticket is saved. Delivery to the service team is continuing in the background.'}
 @app.get('/api/file')
 def file_download():
  u=required()
@@ -342,6 +351,7 @@ def create_admin():
   if u:c.execute(update(users).where(users.c.id==u.id).values(admin=1,password=generate_password_hash(password)));c.execute(delete(sessions).where(sessions.c.user_id==u.id))
   else:c.execute(insert(users).values(id=secrets.token_hex(16),email=email,name='Service team',password=generate_password_hash(password),admin=1,plan='None',minutes_used=0))
  click.echo('Staff account configured.')
+_intake_wake=threading.Event()
 def retry_pending_intake():
  while True:
   try:
@@ -352,7 +362,8 @@ def retry_pending_intake():
     for tid in sorted(pending):sync_ticket(tid)
   except Exception:
    app.logger.warning('Intake retry deferred; requests remain saved')
-  time.sleep(60)
+  _intake_wake.wait(60)
+  _intake_wake.clear()
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
 if os.getenv('RENDER') and notifications.configured():
