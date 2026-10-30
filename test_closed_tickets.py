@@ -12,7 +12,7 @@ class ClosedTicketsTests(unittest.TestCase):
    response=client.post('/api/portal',data={'name':'Closed Test','phone':'5550100','city':'Woodland','state':'CA','postal':'95695','address':'Service address','category':'Solar','subject':'Completed work','description':'Test','ack':'on'},headers={'Origin':'http://localhost'})
   tid=response.json['id']
   with care.engine.begin() as c:c.execute(care.update(care.tickets).where(care.tickets.c.id==tid).values(row_id='123'))
-  cfg=('secret','sheet',{'status':55,'manager':56})
+  cfg=('secret','sheet',{'status':55,'manager':999})
   with patch.object(care,'smartsheet_config',return_value=cfg):
    for status in ['030 - Closed','031 - Closed Phone Support','032 - Closed Text Support','CLOSED','closed - resolved','Completed','040 - Completed','COMPLETE']:
     r=Mock();r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':status}]}]}
@@ -22,7 +22,7 @@ class ClosedTicketsTests(unittest.TestCase):
     self.assertEqual(data['feedbackTickets'],[{'id':tid,'subject':'Completed work'}])
    with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
     self.assertEqual(client.get('/api/portal').json['tickets'],[])
-   r.json.return_value={'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'},{'columnId':56,'displayValue':'02-Alec'}]}]}
+   r.json.return_value={'columns':[{'id':56,'title':'Manager Assigned'}],'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'},{'columnId':56,'objectValue':{'values':[{'name':'02-Alec','email':'test@example.invalid'}]}}]}]}
    with patch.object(care,'smart_request',return_value=r):
     portal=client.get('/api/portal').json
     self.assertEqual(portal['tickets'][0]['id'],tid)

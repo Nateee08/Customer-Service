@@ -156,6 +156,8 @@ def smartsheet_config():
  global _intake_columns,_intake_retry_at
  token=os.getenv('SMARTSHEET_TOKEN');sheet=os.getenv('SMARTSHEET_SHEET_ID')
  if not token or not sheet:return None
+ # Cached read configuration must not wait behind ticket/attachment transfers.
+ if _intake_columns:return token,sheet,_intake_columns
  with _intake_lock:
   if _intake_columns:return token,sheet,_intake_columns
   if time.time()<_intake_retry_at:return None
@@ -176,7 +178,8 @@ def smartsheet_config():
      added=r.json()['result'];columns.extend(added)
      by_title.update({c['title'].strip().casefold():c for c in added})
     mapping[key]=title
-   if 'manager' in by_title:mapping['manager']='Manager'
+   manager_title=next((col['title'] for col in columns if re.match(r'^manager\b',col['title'].strip(),re.I)),None)
+   if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
    app.logger.warning('Smartsheet intake column mapping ready')
    return token,sheet,_intake_columns
@@ -203,10 +206,14 @@ def portal():
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
-    manager_column=cfg[2].get('manager') or next((col['id'] for col in sheet_data.get('columns',[]) if col.get('title','').strip().casefold()=='manager'),None)
+    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.match(r'^manager\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
     manager_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(manager_column)),{})
     manager=manager_cell.get('displayValue') or manager_cell.get('value')
-    t['manager']=str(manager) if isinstance(manager,(str,int,float)) else None
+    if not isinstance(manager,(str,int,float)):
+     obj=manager_cell.get('objectValue') or {}
+     manager=', '.join(str(x.get('name') or x.get('email') or '') for x in obj.get('values',[]) if isinstance(x,dict)) or obj.get('name') or obj.get('email')
+    t['manager']=str(manager) if manager else None
+    t['managerAvailable']=manager_column is not None
     if status:
      t['status']=str(status)
      c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
