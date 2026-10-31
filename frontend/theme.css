@@ -240,5 +240,8 @@
 .care-dark .receipt-dialog .contact-actions {margin-top:24px;}
 
 .care-dark .ticket-status {display:flex;flex-direction:column;align-items:flex-end;gap:6px;}
-.care-dark .ticket-status-label {font-size:12px;font-weight:600;color:#ddd;}
+.care-dark .ticket-field-label {display:block;font-size:14px;line-height:1.5;font-weight:600;color:#fff;}
+.care-dark .ticket-identity {display:flex;flex-direction:column;gap:6px;min-width:0;}
+.care-dark .ticket-reference {font-size:16px;color:#fff;overflow-wrap:anywhere;}
+.care-dark .ticket-status .badge {white-space:normal;text-align:right;}
 @media(max-width:760px){.care-dark .ticket-status {align-items:flex-start;}}
