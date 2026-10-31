@@ -237,12 +237,12 @@ def load_portal_snapshot():
   r=smart_request('GET','',params={'includeAll':'true'},timeout=(3,6));r.raise_for_status()
   sheet=r.json();rows=sheet.get('rows')
   if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):raise ValueError('Incomplete intake sheet')
-  reconcile_deleted_tickets(sheet,known_rows,cfg[2]['status'])
+  reconcile_deleted_tickets(sheet,known_rows,cfg[2]['status'],cfg[2])
   return dict(sheet=sheet,config=cfg,known_rows=known_rows,checked_at=now())
  except Exception as exc:
   app.logger.warning('Portal status refresh deferred after %.2fs (%s); saved tickets retained',time.monotonic()-started,type(exc).__name__)
   raise
-def reconcile_deleted_tickets(sheet,known_rows,status_column=None):
+def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
  # Reconcile each private request/row pair, not the shared customer number.
  rows=sheet.get('rows')
  if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):
@@ -254,7 +254,11 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None):
    if not row_id:continue
    if str(row_id) in present:
     # Restore only from a new successful read, never an older cached view.
-    status=next((cell.get('value') for cell in present[str(row_id)].get('cells',[]) if str(cell['columnId'])==str(status_column)),None)
+    cells={str(cell['columnId']):cell.get('value') for cell in present[str(row_id)].get('cells',[])}
+    if columns:
+     populated=[key for key,cid in columns.items() if cells.get(str(cid)) not in (None,'')]
+     app.logger.warning('Linked intake row check: request=%s row=%s populated_fields=%s',tid,row_id,','.join(populated))
+    status=cells.get(str(status_column))
     if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status=='Deleted from Smartsheet').values(status=str(status)))
     continue
    result=c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!='Deleted from Smartsheet').values(status='Deleted from Smartsheet'))
