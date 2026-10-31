@@ -285,8 +285,11 @@ def refresh_warranties(sheet_data,cfg,owned):
    if previous and version and previous['checked_version']==version:continue
    try:
     response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'includeAll':'true'},timeout=5)
-    response.raise_for_status();start=warranty_dates.closure_timestamp(response.json())
-    if not start:continue
+    response.raise_for_status();history=response.json();start=warranty_dates.closure_timestamp(history)
+    if not start:
+     details=[{'modifiedAt':entry.get('modifiedAt'),'statusCode':str(entry.get('value') or entry.get('displayValue') or '')[:3],'keys':sorted(entry.keys())} for entry in history.get('data',[])[:6]]
+     app.logger.warning('Warranty history unresolved: request=%s count=%s total=%s entries=%s',t['id'],len(history.get('data',[])),history.get('totalCount'),json.dumps(details))
+     continue
     with engine.begin() as c:
      values=dict(user_id=t['user_id'],started_at=start,checked_version=version)
      if previous:c.execute(update(warranties).where(warranties.c.ticket_id==t['id']).values(**values))
@@ -295,8 +298,9 @@ def refresh_warranties(sheet_data,cfg,owned):
      existing=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
      if existing is None:c.execute(insert(closures).values(ticket_id=t['id'],closed_at=actual))
      else:c.execute(update(closures).where(closures.c.ticket_id==t['id']).values(closed_at=actual))
-   except (requests.RequestException,ValueError,KeyError):
-    app.logger.warning('Exact closure time unavailable for ticket %s; warranty date not estimated',t['id'])
+    app.logger.warning('Warranty date verified: request=%s starts=%s',t['id'],start)
+   except (requests.RequestException,ValueError,KeyError) as exc:
+    app.logger.warning('Exact closure time unavailable for ticket %s; error=%s http=%s',t['id'],type(exc).__name__,getattr(getattr(exc,'response',None),'status_code',None))
  finally:_warranty_lock.release()
 
 def saved_contact(user, previous):
