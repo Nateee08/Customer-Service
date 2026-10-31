@@ -75,6 +75,19 @@ class PortalSnapshotTests(unittest.TestCase):
   self.assertEqual(result['tickets'][0]['manager'],'04-Mariah')
   self.assertTrue(result['connected'])
 
+ def test_manager_persists_with_status_and_clear_assignment_is_respected(self):
+  tid=self.ticket('778')
+  row={'id':778,'cells':[{'columnId':55,'value':'020 - Contact Made'},{'columnId':56,'value':'04-Mariah'}]}
+  with patch.object(care,'smart_request',return_value=self.response([row])):care.load_portal_snapshot()
+  with patch.object(care,'_portal_background',True):
+   result=self.client.get('/api/portal').json
+   self.assertEqual(result['tickets'][0]['manager'],'04-Mariah')
+   self.assertEqual(result['tickets'][0]['status'],'020 - Contact Made')
+  row['cells']=row['cells'][:1]
+  with patch.object(care,'smart_request',return_value=self.response([row])):care.load_portal_snapshot()
+  with patch.object(care,'_portal_background',True):
+   self.assertIsNone(self.client.get('/api/portal').json['tickets'][0]['manager'])
+
  def test_slow_smartsheet_returns_saved_ticket_and_profile_without_timeout(self):
   tid=self.ticket('103');release=threading.Event();started=threading.Event()
   def slow(*args,**kwargs):

@@ -26,6 +26,7 @@ sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=T
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
 ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
 ticket_contacts=Table('care_ticket_contacts',meta,Column('ticket_id',String,primary_key=True),Column('first_name',String),Column('last_name',String))
+ticket_assignments=Table('care_ticket_assignments',meta,Column('ticket_id',String,primary_key=True),Column('manager',String))
 intake_attempts=Table('care_intake_attempts',meta,Column('ticket_id',String,primary_key=True),Column('attempted',Integer,nullable=False,default=0))
 column_backups=Table('care_column_migration_backups',meta,Column('id',String,primary_key=True),Column('created',String),Column('payload',Text,nullable=False))
 number_tables=ticket_numbers.define_tables(meta)
@@ -248,6 +249,17 @@ def load_portal_snapshot():
  except Exception as exc:
   app.logger.warning('Portal status refresh deferred after %.2fs (%s); saved tickets retained',time.monotonic()-started,type(exc).__name__)
   raise
+def manager_column_id(sheet,columns):
+ return next((col['id'] for col in sheet.get('columns',[]) if re.search(r'\bmanagers?\b',col.get('title','').strip(),re.I)),(columns or {}).get('manager'))
+
+def manager_value(row,column):
+ cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(column)),{})
+ value=cell.get('displayValue') or cell.get('value')
+ if not isinstance(value,(str,int,float)):
+  obj=cell.get('objectValue') or {}
+  value=', '.join(str(x.get('name') or x.get('email') or '') for x in obj.get('values',[]) if isinstance(x,dict)) or obj.get('name') or obj.get('email')
+ return str(value) if value else None
+
 def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
  # Reconcile each private request/row pair, not the shared customer number.
  rows=sheet.get('rows')
@@ -262,6 +274,7 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
    return any(cells.get(str(cid)) not in (None,'') for cid in columns.values())
   present={rid:row for rid,row in present.items() if populated(row)}
  removed=[]
+ manager_column=manager_column_id(sheet,columns)
  with engine.begin() as c:
   for tid,row_id in known_rows.items():
    if not row_id:continue
@@ -270,6 +283,11 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
     cells={str(cell['columnId']):cell.get('value') for cell in present[str(row_id)].get('cells',[])}
     status=cells.get(str(status_column))
     if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!=str(status)).values(status=str(status)))
+    if manager_column is not None and c.execute(select(tickets.c.id).where(tickets.c.id==tid,tickets.c.row_id==row_id)).scalar():
+     manager=manager_value(present[str(row_id)],manager_column)
+     saved=c.execute(select(ticket_assignments).where(ticket_assignments.c.ticket_id==tid)).mappings().first()
+     if saved is None:c.execute(insert(ticket_assignments).values(ticket_id=tid,manager=manager))
+     elif saved['manager']!=manager:c.execute(update(ticket_assignments).where(ticket_assignments.c.ticket_id==tid).values(manager=manager))
     continue
    result=c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!='Deleted from Smartsheet').values(status='Deleted from Smartsheet'))
    if result.rowcount:removed.append(tid)
@@ -340,18 +358,18 @@ def portal():
   active=[]
   for t in ts:
    t.pop('queue',None)
+   saved_manager=c.execute(select(ticket_assignments).where(ticket_assignments.c.ticket_id==t['id'])).mappings().first()
+   if saved_manager:
+    t['manager']=saved_manager['manager'];t['managerAvailable']=True
    if t['status']=='Deleted from Smartsheet':continue
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
-    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.search(r'\bmanagers?\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
-    manager_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(manager_column)),{})
-    manager=manager_cell.get('displayValue') or manager_cell.get('value')
-    if not isinstance(manager,(str,int,float)):
-     obj=manager_cell.get('objectValue') or {}
-     manager=', '.join(str(x.get('name') or x.get('email') or '') for x in obj.get('values',[]) if isinstance(x,dict)) or obj.get('name') or obj.get('email')
-    t['manager']=str(manager) if manager else None
-    t['managerAvailable']=manager_column is not None
+    manager_column=manager_column_id(sheet_data,cfg[2])
+    if manager_column is not None:
+     t['manager']=manager_value(row,manager_column)
+     t['managerAvailable']=True
+    elif not saved_manager:t['managerAvailable']=False
     if connected and status:
      t['status']=str(status)
      c.execute(update(tickets).where(tickets.c.id==t['id'],tickets.c.user_id==u['id']).values(status=t['status']))
