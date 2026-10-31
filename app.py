@@ -248,6 +248,13 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
  if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):
   raise ValueError('Incomplete intake sheet')
  present={str(row['id']):row for row in rows}
+ # Clearing cells leaves a valid row ID in Smartsheet. Treat a completely
+ # cleared intake row like deletion, but only with a complete known mapping.
+ if columns and {'first_name','last_name','email','phone','address','description','ticket','subject','status'}.issubset(columns):
+  def populated(row):
+   cells={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])}
+   return any(cells.get(str(cid)) not in (None,'') for cid in columns.values())
+  present={rid:row for rid,row in present.items() if populated(row)}
  removed=[]
  with engine.begin() as c:
   for tid,row_id in known_rows.items():
@@ -255,9 +262,6 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
    if str(row_id) in present:
     # Restore only from a new successful read, never an older cached view.
     cells={str(cell['columnId']):cell.get('value') for cell in present[str(row_id)].get('cells',[])}
-    if columns:
-     populated=[key for key,cid in columns.items() if cells.get(str(cid)) not in (None,'')]
-     app.logger.warning('Linked intake row check: request=%s row=%s populated_fields=%s',tid,row_id,','.join(populated))
     status=cells.get(str(status_column))
     if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status=='Deleted from Smartsheet').values(status=str(status)))
     continue

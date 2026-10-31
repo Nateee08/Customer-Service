@@ -148,3 +148,13 @@ class PortalSnapshotTests(unittest.TestCase):
   with patch.object(care,'smart_request',return_value=self.response(rows)):
    result=self.client.get('/api/portal').json
   self.assertEqual(len(result['warranties']),1)
+
+ def test_cleared_row_removes_ticket_and_warranty_without_deleting_row_id(self):
+  cleared=self.ticket('501');kept=self.ticket('502')
+  columns={key:i for i,key in enumerate(('first_name','last_name','email','phone','address','description','ticket','subject','status'),1)}
+  rows=[{'id':501,'cells':[{'columnId':cid,'value':None} for cid in columns.values()]},{'id':502,'cells':[{'columnId':columns['subject'],'value':'Keep this request'}]}]
+  care.reconcile_deleted_tickets({'rows':rows,'totalRowCount':2},{cleared:'501',kept:'502'},columns['status'],columns)
+  with care.engine.connect() as db:
+   statuses=dict(db.execute(care.select(care.tickets.c.id,care.tickets.c.status).where(care.tickets.c.id.in_([cleared,kept]))).all())
+  self.assertEqual(statuses[cleared],'Deleted from Smartsheet')
+  self.assertEqual(statuses[kept],'000 - Intake')
