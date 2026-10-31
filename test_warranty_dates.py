@@ -46,3 +46,17 @@ class WarrantySyncTests(unittest.TestCase):
   with patch.object(care,'required',return_value=user),patch.object(care._portal_snapshot,'get',return_value=(None,False,False)):
    coverage=care.app.test_client().get('/api/portal').json['warranties']
   self.assertEqual(len(coverage),1);self.assertEqual(coverage[0]['startsAt'],'2026-10-31T00:57:28+00:00')
+
+
+class FeedbackCalendarTests(unittest.TestCase):
+ def test_three_local_days_across_both_daylight_saving_changes(self):
+  import datetime
+  from warranty_dates import PACIFIC,feedback_deadline
+  for start,expected,hours in [
+   ('2026-10-30T18:56:16','2026-11-02T18:56:16',73),
+   ('2026-03-06T18:56:16','2026-03-09T18:56:16',71),
+   ('2026-10-23T18:56:16','2026-10-26T18:56:16',72)]:
+   closed=datetime.datetime.fromisoformat(start).replace(tzinfo=PACIFIC)
+   deadline=feedback_deadline(closed.timestamp())
+   self.assertEqual(datetime.datetime.fromtimestamp(deadline,PACIFIC).replace(tzinfo=None).isoformat(),expected)
+   self.assertEqual(deadline-closed.timestamp(),hours*3600)

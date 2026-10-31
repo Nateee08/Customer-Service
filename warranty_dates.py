@@ -52,3 +52,9 @@ def fetch_history(get_page):
         if response.get('pageNumber',page)!=page:raise ValueError('Repeated history page')
         entries.extend(response.get('data',[]))
     return {**first,'data':entries}
+
+
+def feedback_deadline(closed_at):
+    """Three Pacific calendar days, preserving the local closing time over DST."""
+    closed = datetime.datetime.fromtimestamp(closed_at, PACIFIC)
+    return int((closed + datetime.timedelta(days=3)).timestamp())

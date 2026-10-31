@@ -387,7 +387,7 @@ def portal():
     if closed_at is None:
      closed_at=int(time.time())
      c.execute(insert(closures).values(ticket_id=t['id'],closed_at=closed_at))
-    expires=closed_at+3*24*60*60
+    expires=warranty_dates.feedback_deadline(closed_at)
     if time.time()>=expires:continue
     t['feedbackUntil']=datetime.datetime.fromtimestamp(expires,datetime.timezone.utc).isoformat()
    elif connected and row:
@@ -555,7 +555,7 @@ def qa_template():
   t=c.execute(select(tickets).where(tickets.c.id==request.args.get('ticketId'),tickets.c.user_id==u['id'])).first()
   if not t:abort(404)
   closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t.id)).scalar()
-  if not warranty_dates.is_closed(t.status) or closed_at is None or time.time()>=closed_at+259200:abort(403)
+  if not warranty_dates.is_closed(t.status) or closed_at is None or time.time()>=warranty_dates.feedback_deadline(closed_at):abort(403)
  return send_file(io.BytesIO(qa_pdf.template()),mimetype='application/pdf',download_name='Quality-Assurance-Form.pdf')
 @app.post('/api/portal')
 def save_ticket():
@@ -566,7 +566,7 @@ def save_ticket():
    if not t:abort(400,description='Select one of your tickets.')
    closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t.id)).scalar()
    status=(t.status or '').casefold()
-   if not ('closed' in status or re.search(r'\bcomplet(?:e|ed)\b',status)) or closed_at is None or time.time()>=closed_at+259200:
+   if not ('closed' in status or re.search(r'\bcomplet(?:e|ed)\b',status)) or closed_at is None or time.time()>=warranty_dates.feedback_deadline(closed_at):
     abort(400,description='The QA form is available only for closed tickets within three days of closure.')
    if any(not f.get(k,'').strip() for k in ('serviceDate','customerName','signatureDate')) or any(f.get(k) not in ('Exceeds','Meets','Could do better') for k in ('Service technician','Service department')):
     abort(400,description='Complete the service date, both ratings, client signature, and signature date.')
