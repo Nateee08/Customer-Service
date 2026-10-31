@@ -52,7 +52,7 @@ class PortalSnapshotTests(unittest.TestCase):
    db.execute(care.insert(care.tickets).values(id=tid,user_id=user_id or self.user['id'],email='test@example.invalid',name='Test',phone='5305551234',address='1 Test St',category='Solar',subject='Test',description='Test',created=care.now(),status='000 - Intake' if row_id else 'Saved',row_id=row_id))
   return tid
  def response(self,rows,total=None):
-  response=Mock();response.json.return_value={'columns':[{'id':56,'title':'Manager'}],'rows':rows}
+  response=Mock();response.json.return_value={'columns':[{'id':56,'title':'Assigned service manager'}],'rows':rows}
   if total is not None:response.json.return_value['totalRowCount']=total
   return response
  def test_repeated_portal_reads_share_snapshot_and_preserve_account_isolation(self):
@@ -64,6 +64,17 @@ class PortalSnapshotTests(unittest.TestCase):
     self.assertTrue(result['connected']);self.assertEqual([t['id'] for t in result['tickets']],[tid])
     self.assertEqual(result['tickets'][0]['manager'],'02-Alec');self.assertEqual(result['tickets'][0]['deliveryStatus'],'delivered')
    self.assertEqual(api.call_count,1)
+ def test_background_mode_displays_published_status_and_manager_without_network(self):
+  tid=self.ticket('777')
+  row={'id':777,'cells':[{'columnId':55,'value':'020 - Contact Made'},{'columnId':56,'value':'04-Mariah'}]}
+  with patch.object(care,'smart_request',return_value=self.response([row])):
+   self.cache.publish(care.load_portal_snapshot())
+  with patch.object(care,'_portal_background',True),patch.object(care,'smart_request',side_effect=AssertionError('Request made a network call')):
+   result=self.client.get('/api/portal').json
+  self.assertEqual(result['tickets'][0]['status'],'020 - Contact Made')
+  self.assertEqual(result['tickets'][0]['manager'],'04-Mariah')
+  self.assertTrue(result['connected'])
+
  def test_slow_smartsheet_returns_saved_ticket_and_profile_without_timeout(self):
   tid=self.ticket('103');release=threading.Event();started=threading.Event()
   def slow(*args,**kwargs):
@@ -158,3 +169,22 @@ class PortalSnapshotTests(unittest.TestCase):
    statuses=dict(db.execute(care.select(care.tickets.c.id,care.tickets.c.status).where(care.tickets.c.id.in_([cleared,kept]))).all())
   self.assertEqual(statuses[cleared],'Deleted from Smartsheet')
   self.assertEqual(statuses[kept],'000 - Intake')
+
+class BackgroundPublicationTests(unittest.TestCase):
+ def test_published_snapshot_is_used_without_starting_or_waiting_for_a_read(self):
+  cache=care.SheetSnapshot()
+  value={'sheet':{'rows':[]},'checked_at':'now'}
+  cache.publish(value)
+  before=time.monotonic()
+  self.assertEqual(cache.peek(),(value,True,False))
+  self.assertLess(time.monotonic()-before,.05)
+  cache.failed()
+  self.assertEqual(cache.peek(),(value,False,True))
+
+ def test_fresh_client_cache_does_not_wait_for_background_refresh_lock(self):
+  import customer_database as clients
+  class BusyLock:
+   def __enter__(self):raise AssertionError('Foreground waited for refresh')
+   def __exit__(self,*args):pass
+  with patch.object(clients,'_cache',{'rows':[]}),patch.object(clients,'_cache_until',time.time()+60),patch.object(clients,'_lock',BusyLock()):
+   self.assertEqual(clients.get_sheet(),{'rows':[]})

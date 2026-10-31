@@ -215,7 +215,7 @@ def smartsheet_config():
    job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in job_aliases),None)
    if not job_title or 'issue' not in by_title:raise ValueError('Intake needs Job # and Issue columns')
    mapping['ticket']=job_title;mapping['subject']=by_title['issue']['title']
-   manager_title=next((col['title'] for col in columns if re.match(r'^manager\b',col['title'].strip(),re.I)),None)
+   manager_title=next((col['title'] for col in columns if re.search(r'\bmanager\b',col['title'].strip(),re.I)),None)
    if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
    _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns and key not in ('ticket','subject')})
@@ -228,7 +228,8 @@ def smartsheet_config():
 
 def smart_request(method,path,**kwargs):
  cfg=smartsheet_config();return requests.request(method,'https://api.smartsheet.com/2.0/sheets/'+cfg[1]+path,headers={'Authorization':'Bearer '+cfg[0],**kwargs.pop('headers',{})},timeout=kwargs.pop('timeout',15),**kwargs)
-_portal_snapshot=SheetSnapshot()
+_portal_snapshot=SheetSnapshot(ttl=15)
+_portal_background=False
 def load_portal_snapshot():
  started=time.monotonic()
  try:
@@ -267,12 +268,12 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
     # Restore only from a new successful read, never an older cached view.
     cells={str(cell['columnId']):cell.get('value') for cell in present[str(row_id)].get('cells',[])}
     status=cells.get(str(status_column))
-    if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status=='Deleted from Smartsheet').values(status=str(status)))
+    if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!=str(status)).values(status=str(status)))
     continue
    result=c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!='Deleted from Smartsheet').values(status='Deleted from Smartsheet'))
    if result.rowcount:removed.append(tid)
  if removed:app.logger.warning('Intake deletion sync: removed %s website requests: %s',len(removed),', '.join(removed))
- app.logger.warning('Intake reconciliation: sheet_rows=%s linked_requests=%s matched=%s missing=%s',len(rows),len(known_rows),sum(str(row) in present for row in known_rows.values()),sum(str(row) not in present for row in known_rows.values()))
+ app.logger.info('Intake reconciliation: sheet_rows=%s linked_requests=%s matched=%s missing=%s',len(rows),len(known_rows),sum(str(row) in present for row in known_rows.values()),sum(str(row) not in present for row in known_rows.values()))
 
 _warranty_lock=threading.Lock()
 def refresh_warranties(sheet_data,cfg,owned):
@@ -329,7 +330,7 @@ def saved_contact(user, previous):
 @app.get('/api/portal')
 def portal():
  u=required()
- snapshot,connected,syncing=_portal_snapshot.get(load_portal_snapshot)
+ snapshot,connected,syncing=_portal_snapshot.peek() if _portal_background else _portal_snapshot.get(load_portal_snapshot,wait_seconds=.1)
  cfg=snapshot['config'] if snapshot else None
  sheet_data=snapshot['sheet'] if snapshot else {}
  rows=sheet_data.get('rows',[])
@@ -345,7 +346,7 @@ def portal():
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
-    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.match(r'^manager\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
+    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.search(r'\bmanager\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
     manager_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(manager_column)),{})
     manager=manager_cell.get('displayValue') or manager_cell.get('value')
     if not isinstance(manager,(str,int,float)):
@@ -387,7 +388,7 @@ def sync_ticket(tid,include_files=True):
  if not delivered:return False
  return sync_ticket_files(tid) if include_files else True
 
-def deliver_intake_now(tid,wait_seconds=8):
+def deliver_intake_now(tid,wait_seconds=1):
  # Start independently of the retry worker's attachment and warranty backlog.
  # Bound both concurrent work and the HTTP response wait during an API outage.
  if not os.getenv('SMARTSHEET_TOKEN') or not os.getenv('SMARTSHEET_SHEET_ID') or not _intake_delivery_slots.acquire(blocking=False):
@@ -668,8 +669,35 @@ def migrate_intake_columns():
    _column_migration_done=True
    app.logger.warning('Intake column migration complete: moved=%s removed=%s',result['moved'],result['removed'])
   except requests.RequestException as exc:
-   app.logger.warning('Intake column migration pending: HTTP %s',getattr(getattr(exc,'response',None),'status_code',None))
+   status=getattr(getattr(exc,'response',None),'status_code',None)
+   if status==403:_column_migration_retry=float('inf')
+   app.logger.warning('Intake column migration pending: HTTP %s',status)
   except (ValueError,KeyError):app.logger.warning('Intake column migration pending: verification incomplete; old columns retained')
+
+def refresh_portal_loop():
+ # Independent of uploads, client matching, migrations and warranty history.
+ while True:
+  started=time.monotonic()
+  try:
+   snapshot=load_portal_snapshot()
+   _portal_snapshot.publish(snapshot)
+   mapped=snapshot['config'][2]
+   linked=set(str(v) for v in snapshot['known_rows'].values())
+   for row in snapshot['sheet']['rows']:
+    if str(row['id']) not in linked:continue
+    cells={str(cell['columnId']):cell for cell in row.get('cells',[])}
+    status=cells.get(str(mapped['status']),{}).get('value')
+    manager=cells.get(str(mapped.get('manager')), {})
+    app.logger.info('Portal row refreshed: row=%s status=%s manager_present=%s elapsed=%.2fs',row['id'],status,bool(manager.get('value') or manager.get('displayValue') or manager.get('objectValue')),time.monotonic()-started)
+  except Exception:
+   _portal_snapshot.failed()
+  threading.Event().wait(max(1,5-(time.monotonic()-started)))
+
+def warm_client_cache():
+ while True:
+  try:customer_database.get_sheet(force_refresh=True)
+  except Exception:app.logger.warning('Client cache refresh deferred')
+  threading.Event().wait(45)
 
 _intake_wake=threading.Event()
 def retry_pending_intake():
@@ -688,9 +716,10 @@ def retry_pending_intake():
     try:refresh_ticket_numbers()
     except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
     migrate_intake_columns()
-    snapshot=load_portal_snapshot()
-    with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
-    refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
+    snapshot,connected,_=_portal_snapshot.peek()
+    if snapshot and connected:
+     with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
+     refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
   except Exception:
    app.logger.warning('Intake retry deferred; requests remain saved')
   _intake_wake.wait(60)
@@ -712,6 +741,9 @@ def check_client_database():
  except SQLAlchemyError:
    app.logger.warning('Recent intake lookup check deferred: account storage unavailable')
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
+ _portal_background=True
+ threading.Thread(target=refresh_portal_loop,name='portal-status-sync',daemon=True).start()
+ threading.Thread(target=warm_client_cache,name='client-cache',daemon=True).start()
  threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
 if os.getenv('RENDER') and notifications.configured():

@@ -32,10 +32,11 @@ def format_phone(value):
     return f'({digits[:3]}){digits[3:6]}-{digits[6:]}'
 def emails(v): return {x.casefold() for x in re.findall(r'[^\s,;<>]+@[^\s,;<>]+', str(v))}
 
-def get_sheet():
+def get_sheet(force_refresh=False):
     global _sheet_id, _cache, _cache_until
+    if not force_refresh and _cache is not None and time.time() < _cache_until: return _cache
     with _lock:
-        if _cache is not None and time.time() < _cache_until: return _cache
+        if not force_refresh and _cache is not None and time.time() < _cache_until: return _cache
         token = os.getenv('SMARTSHEET_TOKEN')
         if not token: raise RuntimeError('Client database unavailable')
         headers = {'Authorization': 'Bearer ' + token}

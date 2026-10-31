@@ -14,6 +14,22 @@ class SheetSnapshot:
         self._failed = False
         self._pending = None
 
+    def publish(self, value):
+        """Publish a complete background read without waiting on portal requests."""
+        with self._lock:
+            self._value = value
+            self._updated = time.monotonic()
+            self._failed = False
+
+    def peek(self):
+        with self._lock:
+            fresh = self._value is not None and not self._failed and time.monotonic() - self._updated < self.ttl
+            return self._value, fresh, not fresh
+
+    def failed(self):
+        with self._lock:
+            self._failed = True
+
     def get(self, loader, wait_seconds=2):
         start = False
         with self._lock:
