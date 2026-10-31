@@ -49,7 +49,7 @@ class ImmediateIntakeTests(unittest.TestCase):
     def test_submission_confirms_enriched_row_before_responding(self):
         read = Mock(); read.json.return_value = {'rows': []}
         write = Mock(); write.json.return_value = {'result': [{'id': 901}]}
-        with patch.object(care, 'smart_request', side_effect=[read, write]) as api:
+        with patch.object(care, 'smart_request', side_effect=[write]) as api:
             response = self.submit()
             self.assertEqual(response.status_code, 200)
             self.assertEqual(response.json['deliveryStatus'], 'delivered')
@@ -64,7 +64,7 @@ class ImmediateIntakeTests(unittest.TestCase):
             self.assertNotIn('job_number', response.json['ticket'])
             self.assertEqual(self.stored(response.json['id'])['phone'], '(530)555-1234')
             self.assertTrue(care.sync_ticket(response.json['id']))
-            self.assertEqual(api.call_count, 2)
+            self.assertEqual(api.call_count, 1)
 
     def test_uncertain_write_is_saved_and_reconciled_without_a_duplicate(self):
         accepted = []
@@ -85,24 +85,18 @@ class ImmediateIntakeTests(unittest.TestCase):
             self.assertEqual(self.stored(tid)['row_id'], '902')
             self.assertEqual(len(accepted), 1)
 
-    def test_slow_delivery_does_not_hold_the_request_open(self):
-        release = threading.Event(); started = threading.Event(); workers = []
-        thread_class = threading.Thread
-        def delayed(*args, **kwargs):
-            started.set(); release.wait(2)
-            return False
-        def thread(*args, **kwargs):
-            worker = thread_class(*args, **kwargs); workers.append(worker)
-            return worker
-        with patch.object(care, 'sync_ticket', side_effect=delayed), patch.object(care.threading, 'Thread', side_effect=thread):
-            try:
-                before = time.monotonic()
-                self.assertFalse(care.deliver_intake_now('HOS-SLOW', wait_seconds=0.03))
-                self.assertTrue(started.is_set())
-                self.assertLess(time.monotonic() - before, 0.5)
-            finally:
-                release.set()
-                for worker in workers: worker.join(2)
+    def test_busy_writer_returns_promptly_for_background_retry(self):
+        held=threading.Event();release=threading.Event()
+        def hold():
+            with care._intake_lock:
+                held.set();release.wait(2)
+        worker=threading.Thread(target=hold);worker.start();held.wait(1)
+        try:
+            before=time.monotonic()
+            self.assertFalse(care.deliver_intake_now('HOS-BUSY'))
+            self.assertLess(time.monotonic()-before,.5)
+        finally:
+            release.set();worker.join(2)
 
     def test_existing_attachment_upload_cannot_block_new_ticket_row(self):
         old = self.saved_ticket(row='900'); new = self.saved_ticket()

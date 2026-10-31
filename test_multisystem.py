@@ -12,13 +12,13 @@ class MultiSystemTests(unittest.TestCase):
   for choices,expected in [(['Solar','Battery'],'Solar, Battery'),(['Solar','Monitoring'],'Solar, Monitoring'),(['Battery'],'Battery'),(['Solar','Solar','Battery'],'Solar, Battery')]:
    data=MultiDict(base)
    for choice in choices:data.add('category',choice)
-   with patch.object(care,'sync_ticket',return_value=False):
+   with patch.object(care,'deliver_intake_now',return_value=False):
     response=client.post('/api/portal',data=data,headers={'Origin':'http://localhost'})
    self.assertEqual(response.status_code,200)
    tid=response.json['id']
    with care.engine.connect() as c:
     self.assertEqual(c.execute(care.select(care.tickets.c.category).where(care.tickets.c.id==tid)).scalar_one(),expected)
-   r=Mock();r.json.side_effect=[{'rows':[]},{'result':[{'id':123}]}]
+   r=Mock();r.json.side_effect=[{'result':[{'id':123}]}]
    with patch.object(care,'smartsheet_config',return_value=('token','sheet',{'ticket':1,'description':2,'status':3})),patch.object(care,'smart_request',return_value=r) as api:
     self.assertTrue(care.sync_ticket(tid))
     cells=api.call_args.kwargs['json'][0]['cells']

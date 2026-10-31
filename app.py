@@ -26,6 +26,7 @@ sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=T
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
 ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
 ticket_contacts=Table('care_ticket_contacts',meta,Column('ticket_id',String,primary_key=True),Column('first_name',String),Column('last_name',String))
+intake_attempts=Table('care_intake_attempts',meta,Column('ticket_id',String,primary_key=True),Column('attempted',Integer,nullable=False,default=0))
 column_backups=Table('care_column_migration_backups',meta,Column('id',String,primary_key=True),Column('created',String),Column('payload',Text,nullable=False))
 number_tables=ticket_numbers.define_tables(meta)
 customer_numbers,request_numbers,number_counters=number_tables
@@ -215,11 +216,11 @@ def smartsheet_config():
    job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in job_aliases),None)
    if not job_title or 'issue' not in by_title:raise ValueError('Intake needs Job # and Issue columns')
    mapping['ticket']=job_title;mapping['subject']=by_title['issue']['title']
-   manager_title=next((col['title'] for col in columns if re.search(r'\bmanager\b',col['title'].strip(),re.I)),None)
+   manager_title=next((col['title'] for col in columns if re.search(r'\bmanagers?\b',col['title'].strip(),re.I)),None)
    if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
    _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns and key not in ('ticket','subject')})
-   app.logger.warning('Smartsheet intake column mapping ready')
+   app.logger.warning('Smartsheet intake mapping ready: columns=%s manager_column=%s',json.dumps([{k:c.get(k) for k in ('id','title','type')} for c in columns]),_intake_columns.get('manager'))
    return token,sheet,_intake_columns
   except (requests.RequestException,ValueError,KeyError) as exc:
    _intake_retry_at=time.time()+60
@@ -284,12 +285,12 @@ def refresh_warranties(sheet_data,cfg,owned):
    row=by_id.get(t['row_id'])
    if not row:continue
    status=next((cell.get('value') for cell in row.get('cells',[]) if str(cell['columnId'])==str(cfg[2]['status'])),None)
-   app.logger.warning('Warranty eligibility check: request=%s status=%s eligible=%s',t['id'],str(status),warranty_dates.qualifies_warranty(status))
+   app.logger.info('Warranty eligibility check: request=%s status=%s eligible=%s',t['id'],str(status),warranty_dates.qualifies_warranty(status))
    if not warranty_dates.qualifies_warranty(status):continue
    version='030-only:'+str(row.get('modifiedAt') or sheet_data.get('version') or '')
    with engine.connect() as c:previous=c.execute(select(warranties).where(warranties.c.ticket_id==t['id'])).mappings().first()
    if previous and version and previous['checked_version']==version:
-    app.logger.warning('Warranty date already saved: request=%s starts=%s',t['id'],previous['started_at'])
+    app.logger.info('Warranty date already saved: request=%s starts=%s',t['id'],previous['started_at'])
     continue
    try:
     def get_page(page):
@@ -334,9 +335,6 @@ def portal():
  cfg=snapshot['config'] if snapshot else None
  sheet_data=snapshot['sheet'] if snapshot else {}
  rows=sheet_data.get('rows',[])
- if connected:
-  with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.user_id==u['id'])).mappings())
-  threading.Thread(target=refresh_warranties,args=(sheet_data,cfg,owned),daemon=True).start()
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
   active=[]
@@ -346,7 +344,7 @@ def portal():
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
-    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.search(r'\bmanager\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
+    manager_column=next((col['id'] for col in sheet_data.get('columns',[]) if re.search(r'\bmanagers?\b',col.get('title','').strip(),re.I)),cfg[2].get('manager'))
     manager_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(manager_column)),{})
     manager=manager_cell.get('displayValue') or manager_cell.get('value')
     if not isinstance(manager,(str,int,float)):
@@ -389,29 +387,24 @@ def sync_ticket(tid,include_files=True):
  return sync_ticket_files(tid) if include_files else True
 
 def deliver_intake_now(tid,wait_seconds=1):
- # Start independently of the retry worker's attachment and warranty backlog.
- # Bound both concurrent work and the HTTP response wait during an API outage.
- if not os.getenv('SMARTSHEET_TOKEN') or not os.getenv('SMARTSHEET_SHEET_ID') or not _intake_delivery_slots.acquire(blocking=False):
-  _intake_wake.set()
+ # The initial row write runs here, rather than relying on a request-created
+ # thread or waiting for the retry sweep. All remote calls have timeouts.
+ started=time.monotonic()
+ if not _intake_delivery_slots.acquire(blocking=False):
+  _intake_wake.set();return False
+ try:
+  if not _intake_lock.acquire(timeout=.1):
+   app.logger.warning('Immediate intake queued: writer busy request=%s',tid)
+   return False
+  try:delivered=_sync_ticket(tid)
+  finally:_intake_lock.release()
+  app.logger.warning('Immediate intake result: request=%s delivered=%s elapsed=%.2fs',tid,delivered,time.monotonic()-started)
+  return delivered
+ except Exception as exc:
+  app.logger.warning('Immediate intake deferred: request=%s error=%s',tid,type(exc).__name__)
   return False
- finished=threading.Event();result={}
- def deliver():
-  started=time.monotonic()
-  try:
-   result['delivered']=sync_ticket(tid,include_files=False)
-   if result['delivered']:app.logger.warning('Immediate Smartsheet delivery confirmed for ticket %s in %.2fs',tid,time.monotonic()-started)
-  except Exception:
-   app.logger.warning('Immediate intake deferred for ticket %s; request remains saved',tid)
-  finally:
-   _intake_delivery_slots.release()
-   _intake_wake.set()
-   finished.set()
- try:threading.Thread(target=deliver,name='intake-'+tid,daemon=True).start()
- except RuntimeError:
+ finally:
   _intake_delivery_slots.release();_intake_wake.set()
-  return False
- finished.wait(wait_seconds)
- return result.get('delivered',False)
 
 def resolve_ticket_client(t, submitted_job='', client_sheet=None):
  if client_sheet is None:return None
@@ -440,6 +433,9 @@ def intake_values(ticket, submitted_job='', client_sheet=None, reference=None, r
   'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite request ID: '+t['id']+('\n\nClient database job references: '+', '.join(related_jobs) if related_jobs else '')}
 
 def _sync_ticket(tid):
+ started=time.monotonic()
+ cfg=smartsheet_config()
+ if not cfg:return False
  with engine.connect() as c:
   t=dict(c.execute(select(tickets).where(tickets.c.id==tid)).mappings().one())
   parts=c.execute(select(ticket_contacts).where(ticket_contacts.c.ticket_id==tid)).mappings().first()
@@ -457,19 +453,28 @@ def _sync_ticket(tid):
  row=t['row_id']
  try:
   if not row:
-   # Reconcile by the private request ID, never a repeated customer reference.
-   r=smart_request('GET','',params={'includeAll':'true'});r.raise_for_status();matches=[r for r in r.json().get('rows',[]) if ticket_numbers.matches_request(r,cfg[2],tid)]
+   # A brand-new, durably recorded request has never been sent. Only retries
+   # need the full-sheet duplicate check after an uncertain write/crash.
+   with engine.begin() as c:
+    attempted=c.execute(select(intake_attempts.c.attempted).where(intake_attempts.c.ticket_id==tid)).scalar()
+    if attempted is not None:c.execute(update(intake_attempts).where(intake_attempts.c.ticket_id==tid).values(attempted=1))
+   matches=[]
+   if attempted!=0:
+    r=smart_request('GET','',params={'includeAll':'true'},timeout=(2,4));r.raise_for_status()
+    data=r.json()
+    if not isinstance(data.get('rows'),list) or len(data['rows'])<data.get('totalRowCount',len(data['rows'])):return False
+    matches=[r for r in data['rows'] if ticket_numbers.matches_request(r,cfg[2],tid)]
    if len(matches)>1:return False
    if matches:row=str(matches[0]['id'])
    else:
     vals=intake_values(t,job_number,reference=reference,resolution=resolution)
     cells=[{'columnId':int(cid),'value':vals[k]} for k,cid in cfg[2].items() if k in vals and vals[k] is not None and k!='queue']
-    r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}]);r.raise_for_status();row=str(r.json()['result'][0]['id'])
+    r=smart_request('POST','/rows',json=[{'toBottom':True,'cells':cells}],timeout=(2,4));r.raise_for_status();row=str(r.json()['result'][0]['id'])
    with engine.begin() as c:
     c.execute(update(tickets).where(tickets.c.id==tid).values(row_id=row,status='000 - Intake'))
     # Reconciled rows already carry the saved reference when they came from this writer.
     if not matches and reference:c.execute(update(request_numbers).where(request_numbers.c.ticket_id==tid).values(synced=1))
-   app.logger.warning('Smartsheet delivery confirmed for ticket %s',tid)
+   app.logger.warning('Smartsheet delivery confirmed for ticket %s in %.2fs',tid,time.monotonic()-started)
   return True
  except (requests.RequestException,ValueError,KeyError,IndexError) as exc:
   response=getattr(exc,'response',None)
@@ -593,6 +598,7 @@ def save_ticket():
  try:
   with engine.begin() as c:
    c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • sending to service team',**d))
+   c.execute(insert(intake_attempts).values(ticket_id=tid,attempted=0))
    c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
    if 'first_name' in f:c.execute(insert(ticket_contacts).values(ticket_id=tid,first_name=first,last_name=last))
    for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
@@ -675,6 +681,7 @@ def migrate_intake_columns():
   except (ValueError,KeyError):app.logger.warning('Intake column migration pending: verification incomplete; old columns retained')
 
 def refresh_portal_loop():
+ last_states={}
  # Independent of uploads, client matching, migrations and warranty history.
  while True:
   started=time.monotonic()
@@ -688,10 +695,23 @@ def refresh_portal_loop():
     cells={str(cell['columnId']):cell for cell in row.get('cells',[])}
     status=cells.get(str(mapped['status']),{}).get('value')
     manager=cells.get(str(mapped.get('manager')), {})
-    app.logger.info('Portal row refreshed: row=%s status=%s manager_present=%s elapsed=%.2fs',row['id'],status,bool(manager.get('value') or manager.get('displayValue') or manager.get('objectValue')),time.monotonic()-started)
+    state=(status,json.dumps(manager,sort_keys=True))
+    if last_states.get(str(row['id']))!=state:
+     app.logger.warning('Portal row refreshed: row=%s status=%s manager_present=%s elapsed=%.2fs',row['id'],status,bool(manager.get('value') or manager.get('displayValue') or manager.get('objectValue')),time.monotonic()-started)
+     last_states[str(row['id'])]=state
   except Exception:
    _portal_snapshot.failed()
-  threading.Event().wait(max(1,5-(time.monotonic()-started)))
+  threading.Event().wait(max(.2,2-(time.monotonic()-started)))
+
+def refresh_warranty_loop():
+ while True:
+  try:
+   snapshot,connected,_=_portal_snapshot.peek()
+   if snapshot and connected:
+    with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
+    refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
+  except Exception as exc:app.logger.warning('Warranty refresh deferred: %s',type(exc).__name__)
+  threading.Event().wait(1)
 
 def warm_client_cache():
  while True:
@@ -716,13 +736,9 @@ def retry_pending_intake():
     try:refresh_ticket_numbers()
     except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
     migrate_intake_columns()
-    snapshot,connected,_=_portal_snapshot.peek()
-    if snapshot and connected:
-     with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
-     refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
   except Exception:
    app.logger.warning('Intake retry deferred; requests remain saved')
-  _intake_wake.wait(60)
+  _intake_wake.wait(2)
   _intake_wake.clear()
 def check_client_database():
  try:
@@ -743,6 +759,7 @@ def check_client_database():
 if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
  _portal_background=True
  threading.Thread(target=refresh_portal_loop,name='portal-status-sync',daemon=True).start()
+ threading.Thread(target=refresh_warranty_loop,name='warranty-sync',daemon=True).start()
  threading.Thread(target=warm_client_cache,name='client-cache',daemon=True).start()
  threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
  threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
