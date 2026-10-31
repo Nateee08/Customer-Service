@@ -134,7 +134,17 @@ class PortalSnapshotTests(unittest.TestCase):
   deleted=self.ticket('301');kept=self.ticket('302')
   with care.engine.begin() as db:
    for tid in (deleted,kept):db.execute(care.insert(care.warranties).values(ticket_id=tid,user_id=self.user['id'],started_at='2026-10-30T20:00:00+00:00'))
-  with patch.object(care,'smart_request',return_value=self.response([{'id':302,'cells':[]}])):
+  with patch.object(care,'smart_request',return_value=self.response([{'id':302,'cells':[{'columnId':55,'value':'030 - Closed'}]}])):
    result=self.client.get('/api/portal').json
   self.assertEqual([w['ticketId'] for w in result['warranties']],[kept])
   self.assertEqual([t['id'] for t in result['tickets']],[kept])
+
+ def test_phone_and_text_warranties_are_not_displayed(self):
+  rows=[]
+  for row_id,status in [('401','030 - Closed'),('402','031 - Closed Phone Support'),('403','032 - Closed Text Support')]:
+    tid=self.ticket(row_id)
+    with care.engine.begin() as db:db.execute(care.insert(care.warranties).values(ticket_id=tid,user_id=self.user['id'],started_at='2026-10-30T20:00:00+00:00'))
+    rows.append({'id':int(row_id),'cells':[{'columnId':55,'value':status}]})
+  with patch.object(care,'smart_request',return_value=self.response(rows)):
+   result=self.client.get('/api/portal').json
+  self.assertEqual(len(result['warranties']),1)

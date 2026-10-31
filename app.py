@@ -271,8 +271,8 @@ def refresh_warranties(sheet_data,cfg,owned):
    row=by_id.get(t['row_id'])
    if not row:continue
    status=next((cell.get('value') for cell in row.get('cells',[]) if str(cell['columnId'])==str(cfg[2]['status'])),None)
-   if not warranty_dates.is_closed(status):continue
-   version=str(row.get('modifiedAt') or sheet_data.get('version') or '')
+   if not warranty_dates.qualifies_warranty(status):continue
+   version='030-only:'+str(row.get('modifiedAt') or sheet_data.get('version') or '')
    with engine.connect() as c:previous=c.execute(select(warranties).where(warranties.c.ticket_id==t['id'])).mappings().first()
    if previous and version and previous['checked_version']==version:continue
    try:
@@ -354,7 +354,7 @@ def portal():
     c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference).join(tickets,warranties.c.ticket_id==tickets.c.id).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id'],tickets.c.user_id==u['id'],tickets.c.status!='Deleted from Smartsheet').order_by(warranties.c.started_at.desc())).mappings()]
+ with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference,tickets.c.status).join(tickets,warranties.c.ticket_id==tickets.c.id).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id'],tickets.c.user_id==u['id'],tickets.c.status!='Deleted from Smartsheet').order_by(warranties.c.started_at.desc())).mappings() if warranty_dates.qualifies_warranty(w['status'])]
  feedback_tickets=[{'id':t['id'],'reference':t['reference'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,contact=saved_contact(u,ts[0] if ts else None),profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
 

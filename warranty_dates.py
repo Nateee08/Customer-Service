@@ -4,7 +4,13 @@ from zoneinfo import ZoneInfo
 PACIFIC=ZoneInfo('America/Los_Angeles')
 
 def is_closed(value):
-    return bool(re.search(r'\b(?:closed|complete|completed)\b', str(value or ''),re.I))
+    text=str(value or '').strip()
+    code=re.match(r'^(\d{3})(?=$|[\s–—-])',text)
+    if code:return code.group(1) in {'030','031','032'}
+    return bool(re.search(r'\b(?:closed|complete|completed)\b',text,re.I))
+
+def qualifies_warranty(value):
+    return bool(re.match(r'^030(?=$|[\s–—-])',str(value or '').strip()))
 
 def closure_timestamp(history):
     entries=history.get('data',[])
@@ -17,11 +23,11 @@ def closure_timestamp(history):
             dated.append((dt,item.get('value',item.get('displayValue'))))
         except (KeyError,ValueError,TypeError):return None
     dated.sort(key=lambda x:x[0],reverse=True)
-    if not dated or not is_closed(dated[0][1]):return None
-    # Moving between closed subtypes doesn't restart coverage.
+    if not dated or not qualifies_warranty(dated[0][1]):return None
+    # Use the start of the current 030 status period.
     start=dated[0][0]
     for dt,value in dated[1:]:
-        if not is_closed(value):break
+        if not qualifies_warranty(value):break
         start=dt
     return start.astimezone(datetime.timezone.utc).isoformat()
 

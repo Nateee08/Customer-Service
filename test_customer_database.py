@@ -21,7 +21,7 @@ class MatchingTests(unittest.TestCase):
   self.assertIsNone(match(s,'owner@example.com'))
  def test_full_address(self):self.assertEqual(intake_address(match(sheet(),'owner@example.com')),'1 Test St\nRocklin, CA 95677')
  def test_closure_history_and_calendar_year(self):
-  history={'data':[{'modifiedAt':'2026-10-30T18:19:06Z','value':'030 - Closed'},{'modifiedAt':'2026-10-31T19:00:00Z','value':'031 - Closed Phone Support'},{'modifiedAt':'2026-10-29T17:00:00Z','value':'020 - Contact Made'}]}
+  history={'data':[{'modifiedAt':'2026-10-30T18:19:06Z','value':'030 - Closed'},{'modifiedAt':'2026-10-31T19:00:00Z','value':'030 - Closed'},{'modifiedAt':'2026-10-29T17:00:00Z','value':'020 - Contact Made'}]}
   start=closure_timestamp(history);self.assertEqual(start,'2026-10-30T18:19:06+00:00');self.assertEqual(anniversary(start),'2027-10-30T11:19:06-07:00')
   history['data'].append({'modifiedAt':'2026-11-01T00:00:00Z','value':'000 - Intake'});self.assertIsNone(closure_timestamp(history))
   self.assertEqual(anniversary('2024-02-29T20:00:00+00:00'),'2025-02-28T12:00:00-08:00')
