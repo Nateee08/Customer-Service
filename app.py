@@ -279,10 +279,13 @@ def refresh_warranties(sheet_data,cfg,owned):
    row=by_id.get(t['row_id'])
    if not row:continue
    status=next((cell.get('value') for cell in row.get('cells',[]) if str(cell['columnId'])==str(cfg[2]['status'])),None)
+   app.logger.warning('Warranty eligibility check: request=%s status=%s eligible=%s',t['id'],str(status),warranty_dates.qualifies_warranty(status))
    if not warranty_dates.qualifies_warranty(status):continue
    version='030-only:'+str(row.get('modifiedAt') or sheet_data.get('version') or '')
    with engine.connect() as c:previous=c.execute(select(warranties).where(warranties.c.ticket_id==t['id'])).mappings().first()
-   if previous and version and previous['checked_version']==version:continue
+   if previous and version and previous['checked_version']==version:
+    app.logger.warning('Warranty date already saved: request=%s starts=%s',t['id'],previous['started_at'])
+    continue
    try:
     response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'includeAll':'true'},timeout=5)
     response.raise_for_status();history=response.json();start=warranty_dates.closure_timestamp(history)
