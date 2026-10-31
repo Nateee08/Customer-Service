@@ -107,3 +107,34 @@ class PortalSnapshotTests(unittest.TestCase):
     result=self.client.get('/api/portal').json
     self.assertFalse(result['connected']);self.assertEqual(result['tickets'][0]['id'],tid)
     self.assertEqual(result['tickets'][0]['manager'],'02-Alec');self.assertEqual(result['tickets'][0]['status'],'010 - Touched')
+
+ def test_background_snapshot_removes_deleted_request_without_portal_visit(self):
+  deleted=self.ticket('201');kept=self.ticket('202');pending=self.ticket()
+  with patch.object(care,'smart_request',return_value=self.response([{'id':202,'cells':[]}])):
+   care.load_portal_snapshot()
+  with care.engine.connect() as db:
+   statuses=dict(db.execute(care.select(care.tickets.c.id,care.tickets.c.status).where(care.tickets.c.id.in_([deleted,kept,pending]))).all())
+  self.assertEqual(statuses[deleted],'Deleted from Smartsheet')
+  self.assertEqual(statuses[kept],'000 - Intake')
+  self.assertEqual(statuses[pending],'Saved')
+ def test_old_snapshot_cannot_restore_confirmed_deleted_request(self):
+  tid=self.ticket('203')
+  row={'id':203,'cells':[{'columnId':55,'value':'000 - Intake'}]}
+  with patch.object(care,'smart_request',return_value=self.response([row])):
+   self.assertEqual(len(self.client.get('/api/portal').json['tickets']),1)
+  care.reconcile_deleted_tickets({'rows':[]},{tid:'203'})
+  self.assertEqual(self.client.get('/api/portal').json['tickets'],[])
+ def test_reconcile_rejects_partial_snapshot_and_changed_row_link(self):
+  tid=self.ticket('204')
+  with self.assertRaises(ValueError):care.reconcile_deleted_tickets({'rows':[],'totalRowCount':1},{tid:'204'})
+  care.reconcile_deleted_tickets({'rows':[]},{tid:'old-row'})
+  with care.engine.connect() as db:self.assertEqual(db.execute(care.select(care.tickets.c.status).where(care.tickets.c.id==tid)).scalar(),'000 - Intake')
+
+ def test_deleted_ticket_warranty_removed_but_other_coverage_remains(self):
+  deleted=self.ticket('301');kept=self.ticket('302')
+  with care.engine.begin() as db:
+   for tid in (deleted,kept):db.execute(care.insert(care.warranties).values(ticket_id=tid,user_id=self.user['id'],started_at='2026-10-30T20:00:00+00:00'))
+  with patch.object(care,'smart_request',return_value=self.response([{'id':302,'cells':[]}])):
+   result=self.client.get('/api/portal').json
+  self.assertEqual([w['ticketId'] for w in result['warranties']],[kept])
+  self.assertEqual([t['id'] for t in result['tickets']],[kept])

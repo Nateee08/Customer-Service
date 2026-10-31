@@ -237,10 +237,31 @@ def load_portal_snapshot():
   r=smart_request('GET','',params={'includeAll':'true'},timeout=(3,6));r.raise_for_status()
   sheet=r.json();rows=sheet.get('rows')
   if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):raise ValueError('Incomplete intake sheet')
+  reconcile_deleted_tickets(sheet,known_rows,cfg[2]['status'])
   return dict(sheet=sheet,config=cfg,known_rows=known_rows,checked_at=now())
  except Exception as exc:
   app.logger.warning('Portal status refresh deferred after %.2fs (%s); saved tickets retained',time.monotonic()-started,type(exc).__name__)
   raise
+def reconcile_deleted_tickets(sheet,known_rows,status_column=None):
+ # Reconcile each private request/row pair, not the shared customer number.
+ rows=sheet.get('rows')
+ if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):
+  raise ValueError('Incomplete intake sheet')
+ present={str(row['id']):row for row in rows}
+ removed=[]
+ with engine.begin() as c:
+  for tid,row_id in known_rows.items():
+   if not row_id:continue
+   if str(row_id) in present:
+    # Restore only from a new successful read, never an older cached view.
+    status=next((cell.get('value') for cell in present[str(row_id)].get('cells',[]) if str(cell['columnId'])==str(status_column)),None)
+    if status:c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status=='Deleted from Smartsheet').values(status=str(status)))
+    continue
+   result=c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id,tickets.c.status!='Deleted from Smartsheet').values(status='Deleted from Smartsheet'))
+   if result.rowcount:removed.append(tid)
+ if removed:app.logger.warning('Intake deletion sync: removed %s website requests: %s',len(removed),', '.join(removed))
+ app.logger.warning('Intake reconciliation: sheet_rows=%s linked_requests=%s matched=%s missing=%s',len(rows),len(known_rows),sum(str(row) in present for row in known_rows.values()),sum(str(row) not in present for row in known_rows.values()))
+
 _warranty_lock=threading.Lock()
 def refresh_warranties(sheet_data,cfg,owned):
  if not _warranty_lock.acquire(blocking=False):return
@@ -297,6 +318,7 @@ def portal():
   active=[]
   for t in ts:
    t.pop('queue',None)
+   if t['status']=='Deleted from Smartsheet':continue
    row=next((r for r in rows if str(r['id'])==t['row_id']),None)
    if row:
     vals={str(cell['columnId']):cell.get('value') for cell in row.get('cells',[])};status=vals.get(str(cfg[2]['status']))
@@ -332,7 +354,7 @@ def portal():
     c.execute(delete(closures).where(closures.c.ticket_id==t['id']))
    t['files']=[{'key':f['id'],'name':f['name']} for f in c.execute(select(files.c.id,files.c.name).where(files.c.ticket_id==t['id'],files.c.user_id==u['id'])).mappings()]
    active.append(t)
- with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id']).order_by(warranties.c.started_at.desc())).mappings()]
+ with engine.connect() as c:coverage=[{'ticketId':w['ticket_id'],'reference':w['reference'],'startsAt':w['started_at'],'expiresAt':warranty_dates.anniversary(w['started_at'])} for w in c.execute(select(warranties,request_numbers.c.reference).join(tickets,warranties.c.ticket_id==tickets.c.id).outerjoin(request_numbers,warranties.c.ticket_id==request_numbers.c.ticket_id).where(warranties.c.user_id==u['id'],tickets.c.user_id==u['id'],tickets.c.status!='Deleted from Smartsheet').order_by(warranties.c.started_at.desc())).mappings()]
  feedback_tickets=[{'id':t['id'],'reference':t['reference'],'subject':t['subject']} for t in active if t.get('feedbackUntil')]
  return jsonify(tickets=active,feedbackTickets=feedback_tickets,warranties=coverage,contact=saved_contact(u,ts[0] if ts else None),profile={k:u[k] for k in ('plan','membership_start','membership_end','minutes_used','completion_date')},connected=connected,syncing=syncing,updatedAt=snapshot['checked_at'] if snapshot else None)
 
@@ -610,10 +632,9 @@ def retry_pending_intake():
      except Exception:app.logger.warning('Attachment retry deferred for request %s',tid)
     try:refresh_ticket_numbers()
     except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
-    cfg=smartsheet_config()
-    snapshot=smart_request('GET','',params={'includeAll':'true'});snapshot.raise_for_status()
-    with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None))).mappings())
-    refresh_warranties(snapshot.json(),cfg,owned)
+    snapshot=load_portal_snapshot()
+    with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
+    refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
   except Exception:
    app.logger.warning('Intake retry deferred; requests remain saved')
   _intake_wake.wait(60)
