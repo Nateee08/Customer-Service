@@ -47,3 +47,17 @@ class SubmissionExperienceTests(unittest.TestCase):
   a=self.post().json
   with patch.object(care,'required',return_value={**self.user,'id':'different-owner'}):b=self.post().json
   self.assertNotEqual(a['id'],b['id'])
+
+ def test_separate_names_preserve_multiword_first_and_last_names(self):
+  form={**self.form,'first_name':'Mary Ann','last_name':'de la Cruz'};form.pop('name')
+  response=self.post(form);self.assertEqual(response.status_code,200)
+  contact=self.client.get('/api/portal').json['contact']
+  self.assertEqual(contact['name'],'Mary Ann de la Cruz')
+  self.assertEqual(contact['first_name'],'Mary Ann');self.assertEqual(contact['last_name'],'de la Cruz')
+  with care.engine.connect() as c:
+   ticket=dict(c.execute(care.select(care.tickets).where(care.tickets.c.id==response.json['id'])).mappings().one())
+  ticket.update(_first_name='Mary Ann',_last_name='de la Cruz')
+  vals=care.intake_values(ticket,reference='SOC-00001')
+  self.assertEqual(vals['first_name'],'Mary Ann');self.assertEqual(vals['last_name'],'de la Cruz')
+  ticket['_last_name']=''
+  self.assertEqual(care.intake_values(ticket)['last_name'],'')

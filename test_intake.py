@@ -51,13 +51,13 @@ class IntakeDetailsTests(unittest.TestCase):
   self.assertEqual(values['submitted_at'],'11/01/2026 06:30:04 PM PST')
  def test_column_discovery_creates_timestamp_and_maps_job(self):
   import os
-  titles=['First Name','Last Name','Email','Phone #','Address','Notes:','Status','Date Realized','Job #','Website Ticket #','Website Subject']
+  titles=['First Name','Last Name','Email','Phone #','Address','Notes:','Status','Date Realized','Job #','Website Ticket #','Website Subject','Issue']
   cols=[{'id':i+1,'title':title} for i,title in enumerate(titles)]
   existing=Mock();existing.json.return_value={'data':cols}
   created=Mock();created.json.return_value={'result':[{'id':99,'title':'Website Submitted At'}]}
   with patch.dict(os.environ,{'SMARTSHEET_TOKEN':'test','SMARTSHEET_SHEET_ID':'sheet','SMARTSHEET_COLUMNS':'{}'}),patch.object(care,'_intake_columns',None),patch.object(care,'_intake_retry_at',0),patch.object(care.requests,'get',return_value=existing),patch.object(care.requests,'post',return_value=created) as post:
    cfg=care.smartsheet_config()
-   self.assertEqual(cfg[2]['job_number'],9);self.assertEqual(cfg[2]['last_name'],2);self.assertEqual(cfg[2]['submitted_at'],99)
+   self.assertEqual(cfg[2]['ticket'],9);self.assertEqual(cfg[2]['subject'],12);self.assertNotIn('job_number',cfg[2]);self.assertEqual(cfg[2]['last_name'],2);self.assertEqual(cfg[2]['submitted_at'],99)
    self.assertEqual(post.call_args.kwargs['json'][0]['type'],'TEXT_NUMBER')
  def test_enrichment_is_sent_to_smartsheet_not_customer_response(self):
   from test_customer_database import sheet
@@ -78,13 +78,13 @@ class IntakeDetailsTests(unittest.TestCase):
 
  def test_optional_timestamp_column_permission_cannot_block_intake(self):
   import os,requests
-  titles=['First Name','Last Name','Email','Phone #','Address','Notes:','Status','Date Realized','Job #','Website Ticket #','Website Subject']
+  titles=['First Name','Last Name','Email','Phone #','Address','Notes:','Status','Date Realized','Job #','Website Ticket #','Website Subject','Issue']
   cols=[{'id':i+1,'title':title} for i,title in enumerate(titles)]
   existing=Mock();existing.json.return_value={'data':cols}
   denied=Mock(status_code=403)
   with patch.dict(os.environ,{'SMARTSHEET_TOKEN':'test','SMARTSHEET_SHEET_ID':'sheet','SMARTSHEET_COLUMNS':'{}'}),patch.object(care,'_intake_columns',None),patch.object(care,'_intake_retry_at',0),patch.object(care.requests,'get',return_value=existing),patch.object(care.requests,'post',side_effect=requests.HTTPError(response=denied)):
    cfg=care.smartsheet_config()
    self.assertIsNotNone(cfg)
-   self.assertEqual(cfg[2]['job_number'],9);self.assertEqual(cfg[2]['last_name'],2)
+   self.assertEqual(cfg[2]['ticket'],9);self.assertEqual(cfg[2]['last_name'],2)
    self.assertNotIn('submitted_at',cfg[2])
    self.assertIn('Submitted at: 10/30/2026 01:59:03 PM PDT',care.intake_values(self.ticket())['description'])

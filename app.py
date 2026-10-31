@@ -14,6 +14,7 @@ import account_security
 import customer_database
 import warranty_dates
 import ticket_numbers
+import intake_columns
 from sheet_snapshot import SheetSnapshot
 import sys
 app=Flask(__name__)
@@ -24,6 +25,8 @@ users=Table('care_users',meta,Column('id',String,primary_key=True),Column('email
 sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=True),Column('user_id',String,nullable=False),Column('expires',Integer,nullable=False))
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
 ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
+ticket_contacts=Table('care_ticket_contacts',meta,Column('ticket_id',String,primary_key=True),Column('first_name',String),Column('last_name',String))
+column_backups=Table('care_column_migration_backups',meta,Column('id',String,primary_key=True),Column('created',String),Column('payload',Text,nullable=False))
 number_tables=ticket_numbers.define_tables(meta)
 customer_numbers,request_numbers,number_counters=number_tables
 warranties=Table('care_workmanship_dates',meta,Column('ticket_id',String,primary_key=True),Column('user_id',String,nullable=False),Column('started_at',String,nullable=False),Column('checked_version',String))
@@ -197,7 +200,7 @@ def smartsheet_config():
    mapping={'first_name':'First Name','last_name':'Last Name','email':'Email','phone':'Phone #','address':'Address','description':'Notes:','status':'Status','date_realized':'Date Realized'}
    missing=[title for title in mapping.values() if title.casefold() not in by_title]
    if missing:raise ValueError('Required intake columns missing: '+', '.join(missing))
-   for key,title in [('ticket','Website Ticket #'),('subject','Website Subject'),('submitted_at','Website Submitted At')]:
+   for key,title in [('submitted_at','Website Submitted At')]:
     if title.casefold() not in by_title:
      try:
       r=requests.post(base+'/columns',headers=headers,json=[{'title':title,'type':'TEXT_NUMBER','index':len(columns)}],timeout=15);r.raise_for_status()
@@ -210,11 +213,12 @@ def smartsheet_config():
     mapping[key]=title
    job_aliases={customer_database.norm(title) for title in customer_database.ALIASES['job_number']}
    job_title=next((col['title'] for col in columns if customer_database.norm(col['title']) in job_aliases),None)
-   if job_title:mapping['job_number']=job_title
+   if not job_title or 'issue' not in by_title:raise ValueError('Intake needs Job # and Issue columns')
+   mapping['ticket']=job_title;mapping['subject']=by_title['issue']['title']
    manager_title=next((col['title'] for col in columns if re.match(r'^manager\b',col['title'].strip(),re.I)),None)
    if manager_title:mapping['manager']=manager_title
    _intake_columns={key:by_title[title.casefold()]['id'] for key,title in mapping.items()}
-   _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns})
+   _intake_columns.update({key:value for key,value in explicit.items() if key in _intake_columns and key not in ('ticket','subject')})
    app.logger.warning('Smartsheet intake column mapping ready')
    return token,sheet,_intake_columns
   except (requests.RequestException,ValueError,KeyError) as exc:
@@ -287,8 +291,10 @@ def refresh_warranties(sheet_data,cfg,owned):
     app.logger.warning('Warranty date already saved: request=%s starts=%s',t['id'],previous['started_at'])
     continue
    try:
-    response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'includeAll':'true'},timeout=5)
-    response.raise_for_status();history=response.json();start=warranty_dates.closure_timestamp(history)
+    def get_page(page):
+     response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'page':page,'pageSize':100},timeout=5)
+     response.raise_for_status();return response.json()
+    history=warranty_dates.fetch_history(get_page);start=warranty_dates.closure_timestamp(history)
     if not start:
      details=[{'modifiedAt':entry.get('modifiedAt'),'statusCode':str(entry.get('value') or entry.get('displayValue') or '')[:3],'keys':sorted(entry.keys())} for entry in history.get('data',[])[:6]]
      app.logger.warning('Warranty history unresolved: request=%s count=%s total=%s entries=%s',t['id'],len(history.get('data',[])),history.get('totalCount'),json.dumps(details))
@@ -310,6 +316,8 @@ def saved_contact(user, previous):
  contact={'name':user.get('name') or '', 'phone':'', 'address':'', 'address2':'', 'city':'', 'state':'', 'postal':''}
  if not previous:return contact
  contact.update(name=previous.get('name') or contact['name'],phone=previous.get('phone') or '')
+ with engine.connect() as c:parts=c.execute(select(ticket_contacts).where(ticket_contacts.c.ticket_id==previous['id'])).mappings().first()
+ if parts:contact.update(first_name=parts['first_name'],last_name=parts['last_name'])
  lines=(previous.get('address') or '').splitlines()
  if lines:
   contact['address']=lines[0]
@@ -425,14 +433,16 @@ def intake_values(ticket, submitted_job='', client_sheet=None, reference=None, r
  return {**t,'job_number':' / '.join(related_jobs) if related_jobs else submitted_job or None,
   'phone':customer_database.format_phone(t['phone']),
   'ticket':reference or 'Number pending','status':'000 - Intake',
-  'first_name':(matched or {}).get('first_name') or (parts[0] if parts else ''),
-  'last_name':(matched or {}).get('last_name') or (parts[1] if len(parts)>1 else ''),
+  'first_name':t.get('_first_name') or (matched or {}).get('first_name') or (parts[0] if parts else ''),
+  'last_name':t.get('_last_name') or (matched or {}).get('last_name') or ('' if '_last_name' in t else (parts[1] if len(parts)>1 else '')),
   'date_realized':submitted.date().isoformat(),'submitted_at':timestamp,
   'description':t['subject']+'\n\n'+t['description']+'\n\nSystems: '+t['category']+'\nSubmitted by: '+t['name']+'\nSubmitted at: '+timestamp+'\nWebsite request ID: '+t['id']+('\n\nClient database job references: '+', '.join(related_jobs) if related_jobs else '')}
 
 def _sync_ticket(tid):
  with engine.connect() as c:
   t=dict(c.execute(select(tickets).where(tickets.c.id==tid)).mappings().one())
+  parts=c.execute(select(ticket_contacts).where(ticket_contacts.c.ticket_id==tid)).mappings().first()
+  if parts:t.update(_first_name=parts['first_name'],_last_name=parts['last_name'])
   job_number=c.execute(select(ticket_details.c.job_number).where(ticket_details.c.ticket_id==tid)).scalar()
   reference=c.execute(select(request_numbers.c.reference).where(request_numbers.c.ticket_id==tid)).scalar()
  resolution=None
@@ -555,6 +565,10 @@ def save_ticket():
    return {'message':'Your completed QA form has been saved and queued for email delivery to Alec and Customer Service.','emailStatus':'queued'}
   return {'message':'Your completed QA form has been saved. Email delivery is pending because the service team’s email connection is not yet enabled.','emailStatus':'not_configured'}
  fields=('name','phone','address','category','subject','description');d={k:f.get(k,'').strip() for k in fields}
+ first=f.get('first_name','').strip();last=f.get('last_name','').strip()
+ if 'first_name' in f:
+  if not first or len(first)>150 or len(last)>150:abort(400,description='Enter your first name and check the name lengths.')
+  d['name']=' '.join(x for x in (first,last) if x)
  city=f.get('city','').strip();state=f.get('state','').strip().upper();postal=f.get('postal','').strip();address2=f.get('address2','').strip()
  if not d['address'] or len(d['address'])>150 or not city or len(city)>100 or not re.fullmatch(r'[A-Z]{2}',state) or not re.fullmatch(r'\d{5}(?:-\d{4})?',postal) or len(address2)>150:abort(400,description='Enter the full address, including city, two-letter state, and ZIP code.')
  d['address']='\n'.join(x for x in (d['address'],address2,city+', '+state+' '+postal) if x)
@@ -579,6 +593,7 @@ def save_ticket():
   with engine.begin() as c:
    c.execute(insert(tickets).values(id=tid,user_id=u['id'],email=u['email'],created=created_at,status='Saved • sending to service team',**d))
    c.execute(insert(ticket_details).values(ticket_id=tid,job_number=f.get('job_number','').strip()[:100]))
+   if 'first_name' in f:c.execute(insert(ticket_contacts).values(ticket_id=tid,first_name=first,last_name=last))
    for x in stored:c.execute(insert(files).values(ticket_id=tid,**x))
  except IntegrityError:
   with engine.connect() as c:existing=c.execute(select(tickets.c.id).where(tickets.c.id==tid,tickets.c.user_id==u['id'])).scalar()
@@ -631,6 +646,31 @@ def create_admin():
   if u:c.execute(update(users).where(users.c.id==u.id).values(admin=1,password=generate_password_hash(password)));c.execute(delete(sessions).where(sessions.c.user_id==u.id))
   else:c.execute(insert(users).values(id=secrets.token_hex(16),email=email,name='Service team',password=generate_password_hash(password),admin=1,plan='None',minutes_used=0))
  click.echo('Staff account configured.')
+_column_migration_done=False
+_column_migration_retry=0
+def migrate_intake_columns():
+ global _column_migration_done,_column_migration_retry
+ if _column_migration_done or time.time()<_column_migration_retry:return
+ _column_migration_retry=time.time()+300
+ cfg=smartsheet_config()
+ if not cfg:return
+ with _intake_lock:
+  def api(method,path,**kwargs):
+   response=smart_request(method,path,**kwargs);response.raise_for_status();return response.json()
+  def backup(payload):
+   content=json.dumps(payload,sort_keys=True)
+   key=hashlib.sha256((cfg[1]+content).encode()).hexdigest()
+   with engine.begin() as c:
+    if not c.execute(select(column_backups.c.id).where(column_backups.c.id==key)).scalar():
+     c.execute(insert(column_backups).values(id=key,created=now(),payload=content))
+  try:
+   result=intake_columns.migrate(api,backup,lambda count:app.logger.warning('Intake column copy verified: updated_rows=%s; legacy values backed up',count))
+   _column_migration_done=True
+   app.logger.warning('Intake column migration complete: moved=%s removed=%s',result['moved'],result['removed'])
+  except requests.RequestException as exc:
+   app.logger.warning('Intake column migration pending: HTTP %s',getattr(getattr(exc,'response',None),'status_code',None))
+  except (ValueError,KeyError):app.logger.warning('Intake column migration pending: verification incomplete; old columns retained')
+
 _intake_wake=threading.Event()
 def retry_pending_intake():
  while True:
@@ -647,6 +687,7 @@ def retry_pending_intake():
      except Exception:app.logger.warning('Attachment retry deferred for request %s',tid)
     try:refresh_ticket_numbers()
     except Exception:app.logger.warning('Customer ticket numbering deferred; requests remain saved')
+    migrate_intake_columns()
     snapshot=load_portal_snapshot()
     with engine.connect() as c:owned=list(c.execute(select(tickets).where(tickets.c.row_id.is_not(None),tickets.c.status!='Deleted from Smartsheet')).mappings())
     refresh_warranties(snapshot['sheet'],snapshot['config'],owned)
