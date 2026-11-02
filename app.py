@@ -363,6 +363,7 @@ def saved_contact(user, previous):
    contact.update(city=locality[1],state=locality[2],postal=locality[3],address2='\n'.join(lines[1:-1]))
  return contact
 
+_portal_diagnostics={}
 @app.get('/api/portal')
 def portal():
  u=required()
@@ -370,6 +371,9 @@ def portal():
  cfg=snapshot['config'] if snapshot else None
  sheet_data=snapshot['sheet'] if snapshot else {}
  rows=sheet_data.get('rows',[])
+ if time.monotonic()-_portal_diagnostics.get(u['id'],0)>60:
+  _portal_diagnostics[u['id']]=time.monotonic()
+  app.logger.warning('Portal import readiness: connected=%s syncing=%s snapshot=%s rows=%s mapping=%s email_present=%s',connected,syncing,bool(snapshot),len(rows),sorted(cfg[2]) if cfg else [],bool(u.get('email')))
  if connected:intake_import.link(sys.modules[__name__],u,snapshot)
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]

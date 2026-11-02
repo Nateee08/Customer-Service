@@ -31,11 +31,14 @@ def created_at(row,values):
 def link(a,user,snapshot):
     """Caller must authenticate the account's verified session before calling."""
     sheet=snapshot['sheet'];columns=snapshot['config'][2];sheet_id=snapshot['config'][1]
-    if not {'email','status','subject','ticket'}.issubset(columns):return
+    if not {'email','status','subject','ticket'}.issubset(columns):
+        a.app.logger.warning('Intake import skipped: incomplete mapping %s',sorted(columns));return
     rows=sheet.get('rows')
-    if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):return
+    if not isinstance(rows,list) or len(rows)<sheet.get('totalRowCount',len(rows)):
+        a.app.logger.warning('Intake import skipped: incomplete sheet');return
     email=(user.get('email') or '').strip().casefold()
-    if not email:return
+    if not email:
+        a.app.logger.warning('Intake import skipped: missing verified email');return
     with _lock,a.engine.begin() as c:
         key=(user['id'],str(sheet_id),email)
         version=sheet.get('version')
