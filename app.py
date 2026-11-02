@@ -376,6 +376,12 @@ def portal():
  if time.monotonic()-_portal_diagnostics.get(u['id'],0)>60:
   _portal_diagnostics[u['id']]=time.monotonic()
   app.logger.warning('Portal import readiness: connected=%s syncing=%s snapshot=%s rows=%s mapping=%s email_present=%s',connected,syncing,bool(snapshot),len(rows),sorted(cfg[2]) if cfg else [],bool(u.get('email')))
+  if not snapshot:
+   import traceback
+   frames=sys._current_frames()
+   for worker in threading.enumerate():
+    frame=frames.get(worker.ident)
+    if frame:app.logger.warning('Refresh thread location: name=%s cache=%s stack=%s',worker.name,id(_portal_snapshot),[(Path(f.filename).name,f.lineno,f.name) for f in traceback.extract_stack(frame)[-8:]])
  if connected:intake_import.link(sys.modules[__name__],u,snapshot)
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
@@ -731,6 +737,7 @@ def refresh_portal_loop():
   try:
    snapshot=load_portal_snapshot()
    _portal_snapshot.publish(snapshot)
+   if not last_states:app.logger.warning('Background cache published: cache=%s rows=%s',id(_portal_snapshot),len(snapshot['sheet']['rows']))
    mapped=snapshot['config'][2]
    linked=set(str(v) for v in snapshot['known_rows'].values())
    for row in snapshot['sheet']['rows']:
