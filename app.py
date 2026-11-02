@@ -367,7 +367,9 @@ _portal_diagnostics={}
 @app.get('/api/portal')
 def portal():
  u=required()
- snapshot,connected,syncing=_portal_snapshot.peek() if _portal_background else _portal_snapshot.get(load_portal_snapshot,wait_seconds=.1)
+ # Recover an empty/stale request cache even when the background worker is enabled.
+ # get() deduplicates refreshes and bounds the request wait to 100 ms.
+ snapshot,connected,syncing=_portal_snapshot.get(load_portal_snapshot,wait_seconds=.1)
  cfg=snapshot['config'] if snapshot else None
  sheet_data=snapshot['sheet'] if snapshot else {}
  rows=sheet_data.get('rows',[])

@@ -47,6 +47,13 @@ class ImportTests(unittest.TestCase):
   self.assertEqual(self.portal(snapshot)['tickets'][0]['reference'],'00712')
   self.values['ticket']=''
   self.assertIsNone(self.portal(self.make_snapshot())['tickets'][0]['reference'])
+ def test_empty_production_cache_recovers_and_imports(self):
+  cache=a.SheetSnapshot()
+  with patch.object(a,'_portal_snapshot',cache),patch.object(a,'_portal_background',True),patch.object(a,'load_portal_snapshot',return_value=self.snapshot) as loader:
+   result=self.client.get('/api/portal').json
+   loader.assert_called_once()
+   self.assertTrue(result['connected'])
+   self.assertEqual(result['tickets'][0]['reference'],'9184')
  def test_unverified_account_cannot_claim_a_smartsheet_ticket(self):
   anonymous=a.app.test_client()
   cache=a.SheetSnapshot();cache.publish(self.snapshot)
