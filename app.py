@@ -376,12 +376,6 @@ def portal():
  if time.monotonic()-_portal_diagnostics.get(u['id'],0)>60:
   _portal_diagnostics[u['id']]=time.monotonic()
   app.logger.warning('Portal import readiness: connected=%s syncing=%s snapshot=%s rows=%s mapping=%s email_present=%s',connected,syncing,bool(snapshot),len(rows),sorted(cfg[2]) if cfg else [],bool(u.get('email')))
-  if not snapshot:
-   import traceback
-   frames=sys._current_frames()
-   for worker in threading.enumerate():
-    frame=frames.get(worker.ident)
-    if frame:app.logger.warning('Refresh thread location: name=%s cache=%s stack=%s',worker.name,id(_portal_snapshot),[(Path(f.filename).name,f.lineno,f.name) for f in traceback.extract_stack(frame)[-8:]])
  if connected:intake_import.link(sys.modules[__name__],u,snapshot)
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
@@ -737,7 +731,7 @@ def refresh_portal_loop():
   try:
    snapshot=load_portal_snapshot()
    _portal_snapshot.publish(snapshot)
-   if not last_states:app.logger.warning('Background cache published: cache=%s rows=%s',id(_portal_snapshot),len(snapshot['sheet']['rows']))
+
    mapped=snapshot['config'][2]
    linked=set(str(v) for v in snapshot['known_rows'].values())
    for row in snapshot['sheet']['rows']:
@@ -806,15 +800,27 @@ def check_client_database():
   app.logger.warning('Client intake database unavailable: API account must have access to the configured client sheet')
  except SQLAlchemyError:
    app.logger.warning('Recent intake lookup check deferred: account storage unavailable')
-if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
- _portal_background=True
- threading.Thread(target=refresh_portal_loop,name='portal-status-sync',daemon=True).start()
- threading.Thread(target=refresh_warranty_loop,name='warranty-sync',daemon=True).start()
- threading.Thread(target=warm_client_cache,name='client-cache',daemon=True).start()
- threading.Thread(target=check_client_database,name='client-database-check',daemon=True).start()
- threading.Thread(target=retry_pending_intake,name='intake-delivery',daemon=True).start()
-if os.getenv('RENDER') and notifications.configured():
- threading.Thread(target=notifications.check_account_sender,args=(app.logger,),name='account-email-check',daemon=True).start()
- threading.Thread(target=notifications.run_worker,args=(engine,email_outbox,app.logger),name='staff-email',daemon=True).start()
+_background_pid=None
+_background_start_lock=threading.Lock()
+def start_background_workers():
+ global _background_pid,_portal_background
+ with _background_start_lock:
+  if _background_pid==os.getpid():return
+  _background_pid=os.getpid()
+  # A preloaded Gunicorn app must not share inherited DB connections.
+  if engine:engine.dispose(close=False)
+  workers=[]
+  if os.getenv('RENDER') and os.getenv('SMARTSHEET_TOKEN'):
+   _portal_background=True
+   workers.extend([(refresh_portal_loop,'portal-status-sync',()),
+    (refresh_warranty_loop,'warranty-sync',()),(warm_client_cache,'client-cache',()),
+    (check_client_database,'client-database-check',()),(retry_pending_intake,'intake-delivery',())])
+  if os.getenv('RENDER') and notifications.configured():
+   workers.extend([(notifications.check_account_sender,'account-email-check',(app.logger,)),
+    (notifications.run_worker,'staff-email',(engine,email_outbox,app.logger))])
+  for target,name,args in workers:threading.Thread(target=target,name=name,args=args,daemon=True).start()
+  app.logger.warning('Background workers started in serving process: pid=%s workers=%s',os.getpid(),[w[1] for w in workers])
 account_security.install(sys.modules[__name__])
-if __name__=='__main__':app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))
+if __name__=='__main__':
+ start_background_workers()
+ app.run(host='0.0.0.0',port=int(os.getenv('PORT','5000')))
