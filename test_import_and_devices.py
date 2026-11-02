@@ -24,6 +24,19 @@ class ImportTests(unittest.TestCase):
    t=data['tickets'][0];self.assertEqual(t['reference'],'HOS-9184');self.assertEqual(t['status'],'020 - Contact Made');self.assertEqual(t['manager'],'02-Alec')
    self.assertNotIn('PRIVATE STAFF NOTES',str(data));self.assertEqual(t['created'],'2026-10-20T18:00:00+00:00')
   with a.engine.connect() as c:self.assertEqual(len(c.execute(a.select(a.tickets).where(a.tickets.c.row_id==str(self.rid))).all()),1)
+ def test_separate_rows_keep_same_existing_customer_number(self):
+  self.values['ticket']='SOC-00002'
+  snapshot=self.make_snapshot()
+  first=snapshot['sheet']['rows'][0]
+  snapshot['sheet']['rows'].append({**first,'id':self.rid+1})
+  result=self.portal(snapshot)['tickets']
+  self.assertEqual(len(result),2)
+  self.assertEqual({t['reference'] for t in result},{'SOC-00002'})
+  self.assertEqual(len({t['id'] for t in result}),2)
+  # Changing the job number cannot break the email/row association.
+  snapshot['sheet']['rows'][1]['cells']=[{**cell,'value':'12345'} if cell['columnId']==self.cols['ticket'] else cell for cell in first['cells']]
+  result=self.portal(snapshot)['tickets']
+  self.assertEqual({t['reference'] for t in result},{'SOC-00002','HOS-12345'})
  def test_unverified_account_cannot_claim_a_smartsheet_ticket(self):
   anonymous=a.app.test_client()
   cache=a.SheetSnapshot();cache.publish(self.snapshot)

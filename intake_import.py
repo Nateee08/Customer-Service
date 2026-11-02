@@ -43,14 +43,19 @@ def link(a,user,snapshot):
         key=(user['id'],str(sheet_id),email)
         version=sheet.get('version')
         if version is not None and _linked_versions.get(key)==version:return
+        counts={'rows':len(rows),'matched':0,'created':0,'existing_web':0,'other_owner':0,'website_marker':0}
+        matched_rows=[]
         for row in rows:
             values=cell_values(row,columns)
             if email not in customer_database.emails(values.get('email','')):continue
-            rid=str(row['id'])
+            counts['matched']+=1
+            rid=str(row['id']);matched_rows.append(rid)
             existing=c.execute(select(a.tickets).where(a.tickets.c.row_id==rid)).mappings().first()
             if existing:
-                if existing['user_id']!=user['id']:continue
-                if not c.execute(select(a.imported_tickets.c.ticket_id).where(a.imported_tickets.c.ticket_id==existing['id'])).scalar():continue
+                if existing['user_id']!=user['id']:
+                    counts['other_owner']+=1;continue
+                if not c.execute(select(a.imported_tickets.c.ticket_id).where(a.imported_tickets.c.ticket_id==existing['id'])).scalar():
+                    counts['existing_web']+=1;continue
                 tid=existing['id']
                 public={'subject':str(values.get('subject') or 'Service request'),
                     'name':' '.join(str(values.get(k) or '').strip() for k in ('first_name','last_name')).strip() or user.get('name',''),
@@ -59,7 +64,8 @@ def link(a,user,snapshot):
                 if changed:c.execute(update(a.tickets).where(a.tickets.c.id==tid,a.tickets.c.user_id==user['id']).values(**changed))
             else:
                 # A website write may already exist while its row link is committing.
-                if re.search(r'(?m)^Website (?:request ID|ticket):\s*\S+',str(values.get('description') or '')):continue
+                if re.search(r'(?m)^Website (?:request ID|ticket):\s*\S+',str(values.get('description') or '')):
+                    counts['website_marker']+=1;continue
                 tid='SM-'+hashlib.sha256((str(sheet_id)+':'+rid).encode()).hexdigest()[:32]
                 if c.execute(select(a.tickets.c.id).where(a.tickets.c.id==tid)).scalar():continue
                 c.execute(insert(a.tickets).values(id=tid,user_id=user['id'],row_id=rid,email=email,
@@ -67,6 +73,7 @@ def link(a,user,snapshot):
                     phone=customer_database.format_phone(values.get('phone')),address=str(values.get('address') or ''),
                     category='Service',subject=str(values.get('subject') or 'Service request'),
                     description='Service request recorded by our service team.',created=created_at(row,values),status=str(values.get('status') or '000 - Intake')))
+                counts['created']+=1
                 c.execute(insert(a.imported_tickets).values(ticket_id=tid,sheet_id=str(sheet_id)))
                 c.execute(insert(a.ticket_contacts).values(ticket_id=tid,first_name=str(values.get('first_name') or ''),last_name=str(values.get('last_name') or '')))
             ref=reference(values.get('ticket'))
@@ -87,6 +94,7 @@ def link(a,user,snapshot):
                 manager=a.manager_value(row,manager_col)
                 if saved:c.execute(update(a.ticket_assignments).where(a.ticket_assignments.c.ticket_id==tid).values(manager=manager))
                 else:c.execute(insert(a.ticket_assignments).values(ticket_id=tid,manager=manager))
+    a.app.logger.warning('Intake account import: account=%s version=%s counts=%s matched_rows=%s',hashlib.sha256(str(user['id']).encode()).hexdigest()[:12],version,counts,matched_rows)
     if version is not None:
         with _lock:
             if len(_linked_versions)>1000:_linked_versions.clear()
