@@ -24,7 +24,7 @@ class ClosedTicketsTests(unittest.TestCase):
     self.assertTrue(data['tickets'][0]['feedbackUntil'])
     self.assertEqual(data['feedbackTickets'][0]['id'],tid)
    with care.engine.begin() as c:
-    c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-259200))
+    c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-345600))
    with patch.object(care,'smart_request',side_effect=requests.ConnectionError()):
     self.assertEqual(self.portal(client).json['tickets'],[])
    r.json.return_value={'columns':[{'id':56,'title':'Manager Assigned'}],'rows':[{'id':123,'cells':[{'columnId':55,'value':'010 - Touched'},{'columnId':56,'objectValue':{'values':[{'name':'02-Alec','email':'test@example.invalid'}]}}]}]}

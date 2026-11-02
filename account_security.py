@@ -22,10 +22,96 @@ def define_table(meta):
         Column('attempts', Integer, nullable=False, default=0))
 
 
+def define_security_tables(meta):
+    devices=Table('care_trusted_devices',meta,
+        Column('token',String,primary_key=True),Column('user_id',String,nullable=False),
+        Column('agent',String,nullable=False),Column('label',String,nullable=False),
+        Column('expires',Integer,nullable=False),Column('used',Integer,nullable=False))
+    prefs=Table('care_security_preferences',meta,
+        Column('user_id',String,primary_key=True),Column('every_login',Integer,nullable=False,default=0))
+    return devices,prefs
+
+
 def install(a):
     app, engine, challenges = a.app, a.engine, a.challenges
     deliveries = a.account_deliveries
     app.config.setdefault('ACCOUNT_EMAIL_ASYNC', bool(os.getenv('RENDER')))
+    devices,prefs=a.trusted_devices,a.security_preferences
+
+    def device_label():
+        ua=request.headers.get('User-Agent','')
+        browser='Edge' if 'Edg/' in ua else 'Chrome' if 'Chrome/' in ua else 'Firefox' if 'Firefox/' in ua else 'Safari' if 'Safari/' in ua else 'Browser'
+        platform='iPhone' if 'iPhone' in ua else 'iPad' if 'iPad' in ua else 'Android' if 'Android' in ua else 'Windows' if 'Windows' in ua else 'Mac' if 'Macintosh' in ua else 'device'
+        return browser+' on '+platform
+
+    def session_response(c,uid):
+        session=secrets.token_urlsafe(32)
+        c.execute(insert(a.sessions).values(token=a.digest(session),user_id=uid,expires=int(time.time())+43200))
+        r=redirect('/')
+        r.set_cookie('care_session',session,httponly=True,secure=a.secure_cookies(),samesite='Lax',max_age=43200)
+        r.delete_cookie('care_challenge')
+        return r
+
+    def remember(c,r,uid,expires=None):
+        expires=expires or int(time.time())+30*86400
+        old=a.digest(request.cookies.get('care_trusted_device',''))
+        c.execute(delete(devices).where(devices.c.token==old,devices.c.user_id==uid))
+        c.execute(delete(devices).where(devices.c.expires<int(time.time())))
+        token=secrets.token_urlsafe(32)
+        c.execute(insert(devices).values(token=a.digest(token),user_id=uid,
+            agent=a.digest(request.headers.get('User-Agent','')),label=device_label(),expires=expires,used=int(time.time())))
+        r.set_cookie('care_trusted_device',token,max_age=max(1,expires-int(time.time())),httponly=True,secure=a.secure_cookies(),samesite='Lax')
+
+    def trusted_login(uid):
+        token=request.cookies.get('care_trusted_device')
+        if not token:return None
+        with engine.begin() as c:
+            every=c.execute(select(prefs.c.every_login).where(prefs.c.user_id==uid)).scalar()
+            if every:return None
+            device=c.execute(select(devices).where(devices.c.token==a.digest(token),devices.c.user_id==uid).with_for_update()).mappings().first()
+            if not device or device['expires']<=time.time() or device['agent']!=a.digest(request.headers.get('User-Agent','')):return None
+            r=session_response(c,uid)
+            remember(c,r,uid,device['expires'])
+            return r
+    a.trusted_login=trusted_login
+
+    @app.route('/account/settings',methods=['GET','POST'])
+    def settings():
+        u=a.required();message=''
+        with engine.begin() as c:
+            if request.method=='POST':
+                a.rate('security-settings:'+u['id'],10)
+                if not check_password_hash(u['password'],request.form.get('password','')):
+                    message='Your current password is incorrect. No settings were changed.'
+                else:
+                    action=request.form.get('action')
+                    if action=='save':
+                        every=int(request.form.get('every_login')=='on')
+                        existing=c.execute(select(prefs.c.user_id).where(prefs.c.user_id==u['id'])).scalar()
+                        if existing:c.execute(update(prefs).where(prefs.c.user_id==u['id']).values(every_login=every))
+                        else:c.execute(insert(prefs).values(user_id=u['id'],every_login=every))
+                        if every:c.execute(delete(devices).where(devices.c.user_id==u['id']))
+                        message='Security preferences saved.'
+                    elif action=='remove':
+                        c.execute(delete(devices).where(devices.c.user_id==u['id'],devices.c.token==request.form.get('device')))
+                        message='Device removed. Its next sign-in will require an email code.'
+                    elif action=='revoke-all':
+                        c.execute(delete(devices).where(devices.c.user_id==u['id']))
+                        c.execute(delete(a.sessions).where(a.sessions.c.user_id==u['id'],a.sessions.c.token!=a.digest(request.cookies.get('care_session',''))))
+                        message='Other sessions signed out and all remembered devices removed.'
+            every=c.execute(select(prefs.c.every_login).where(prefs.c.user_id==u['id'])).scalar() or 0
+            remembered=[dict(row) for row in c.execute(select(devices).where(devices.c.user_id==u['id'],devices.c.expires>int(time.time())).order_by(devices.c.used.desc())).mappings()]
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        for device in remembered:
+            device['expiry']=datetime.fromtimestamp(device['expires'],ZoneInfo('America/Los_Angeles')).strftime('%b %d, %Y')
+            device['current']=device['token']==a.digest(request.cookies.get('care_trusted_device',''))
+        csrf=request.cookies.get('care_csrf') or secrets.token_urlsafe(32)
+        r=make_response(render_template('security.html',csrf=csrf,email=u['email'],every=every,devices=remembered,message=message))
+        r.headers['Cache-Control']='no-store'
+        r.set_cookie('care_csrf',csrf,httponly=True,secure=a.secure_cookies(),samesite='Lax')
+        return r
+
 
     def delivery_state(conn, token):
         row = conn.execute(select(deliveries).where(deliveries.c.token == token)).mappings().first()
@@ -131,11 +217,9 @@ def install(a):
                     # Row lock and deletion make this challenge single use, even on concurrent requests.
                     c.execute(delete(challenges).where(challenges.c.token == token))
                     c.execute(delete(deliveries).where(deliveries.c.token == token))
-                    session = secrets.token_urlsafe(32)
-                    c.execute(insert(a.sessions).values(token=a.digest(session), user_id=row['user_id'], expires=int(time.time())+43200))
-                    r = redirect('/')
-                    r.set_cookie('care_session', session, httponly=True, secure=a.secure_cookies(), samesite='Lax', max_age=43200)
-                    r.delete_cookie('care_challenge')
+                    r=session_response(c,row['user_id'])
+                    every=c.execute(select(prefs.c.every_login).where(prefs.c.user_id==row['user_id'])).scalar()
+                    if request.form.get('remember_device')=='on' and not every:remember(c,r,row['user_id'])
                     return r
                 message = 'That code is not valid. Please try again.'
             state = delivery_state(c, token)

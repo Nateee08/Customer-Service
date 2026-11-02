@@ -15,6 +15,7 @@ import customer_database
 import warranty_dates
 import ticket_numbers
 import intake_columns
+import intake_import
 from sheet_snapshot import SheetSnapshot
 import sys
 app=Flask(__name__)
@@ -26,6 +27,8 @@ sessions=Table('care_verified_sessions',meta,Column('token',String,primary_key=T
 tickets=Table('care_tickets',meta,Column('id',String,primary_key=True),Column('user_id',String,nullable=False),Column('email',String,nullable=False),Column('name',String),Column('phone',String),Column('address',String),Column('category',String),Column('subject',String),Column('description',Text),Column('created',String),Column('status',String),Column('row_id',String),Column('queue',Integer))
 ticket_details=Table('care_ticket_details',meta,Column('ticket_id',String,primary_key=True),Column('job_number',String))
 ticket_contacts=Table('care_ticket_contacts',meta,Column('ticket_id',String,primary_key=True),Column('first_name',String),Column('last_name',String))
+imported_tickets=Table('care_imported_tickets',meta,Column('ticket_id',String,primary_key=True),Column('sheet_id',String,nullable=False))
+closure_checks=Table('care_closure_checks',meta,Column('ticket_id',String,primary_key=True),Column('version',String,nullable=False))
 ticket_assignments=Table('care_ticket_assignments',meta,Column('ticket_id',String,primary_key=True),Column('manager',String))
 intake_attempts=Table('care_intake_attempts',meta,Column('ticket_id',String,primary_key=True),Column('attempted',Integer,nullable=False,default=0))
 column_backups=Table('care_column_migration_backups',meta,Column('id',String,primary_key=True),Column('created',String),Column('payload',Text,nullable=False))
@@ -37,6 +40,7 @@ files=Table('care_files',meta,Column('id',String,primary_key=True),Column('ticke
 reviews=Table('care_reviews',meta,Column('id',String,primary_key=True),Column('ticket_id',String),Column('user_id',String),Column('data',Text),Column('created',String))
 challenges=account_security.define_table(meta)
 account_deliveries=account_security.define_delivery_table(meta)
+trusted_devices,security_preferences=account_security.define_security_tables(meta)
 resets=Table('care_resets',meta,Column('token',String,primary_key=True),Column('user_id',String),Column('expires',Integer))
 limits=Table('care_limits',meta,Column('key',String,primary_key=True),Column('count',Integer,nullable=False))
 url=os.getenv('DATABASE_URL','')
@@ -148,6 +152,9 @@ def auth():
   else:
    if not u or not check_password_hash(u['password'],password):return auth_view(mode,'Email or password is incorrect.',400)
    uid=u['id']
+ if mode=='login':
+  remembered=trusted_login(uid)
+  if remembered is not None:return remembered
  return start_verification(uid,email)
 @app.get('/logout')
 def logout():
@@ -177,7 +184,7 @@ def reset(token):
   if request.method=='GET':return auth_view('reset')
   password=request.form.get('password','')
   if not 12<=len(password)<=128:return auth_view('reset','Use 12–128 characters.',400)
-  c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']));c.execute(delete(challenges).where(challenges.c.user_id==row['user_id']))
+  c.execute(update(users).where(users.c.id==row['user_id']).values(password=generate_password_hash(password)));c.execute(delete(resets).where(resets.c.user_id==row['user_id']));c.execute(delete(sessions).where(sessions.c.user_id==row['user_id']));c.execute(delete(challenges).where(challenges.c.user_id==row['user_id']));c.execute(delete(trusted_devices).where(trusted_devices.c.user_id==row['user_id']))
  return redirect('/login')
 _intake_lock=threading.RLock()
 _intake_attachment_lock=threading.Lock()
@@ -279,6 +286,12 @@ def reconcile_deleted_tickets(sheet,known_rows,status_column=None,columns=None):
   for tid,row_id in known_rows.items():
    if not row_id:continue
    if str(row_id) in present:
+    if columns and c.execute(select(imported_tickets.c.ticket_id).where(imported_tickets.c.ticket_id==tid)).scalar():
+     owner=c.execute(select(users.c.email).join(tickets,users.c.id==tickets.c.user_id).where(tickets.c.id==tid)).scalar()
+     source=intake_import.cell_values(present[str(row_id)],columns)
+     if not owner or owner.casefold() not in customer_database.emails(source.get('email','')):
+      c.execute(update(tickets).where(tickets.c.id==tid,tickets.c.row_id==row_id).values(status='Deleted from Smartsheet'))
+      continue
     # Restore only from a new successful read, never an older cached view.
     cells={str(cell['columnId']):cell.get('value') for cell in present[str(row_id)].get('cells',[])}
     status=cells.get(str(status_column))
@@ -304,25 +317,29 @@ def refresh_warranties(sheet_data,cfg,owned):
    if not row:continue
    status=next((cell.get('value') for cell in row.get('cells',[]) if str(cell['columnId'])==str(cfg[2]['status'])),None)
    app.logger.info('Warranty eligibility check: request=%s status=%s eligible=%s',t['id'],str(status),warranty_dates.qualifies_warranty(status))
-   if not warranty_dates.qualifies_warranty(status):continue
+   if not warranty_dates.is_closed(status):continue
    version='030-only:'+str(row.get('modifiedAt') or sheet_data.get('version') or '')
    with engine.connect() as c:previous=c.execute(select(warranties).where(warranties.c.ticket_id==t['id'])).mappings().first()
-   if previous and version and previous['checked_version']==version:
-    app.logger.info('Warranty date already saved: request=%s starts=%s',t['id'],previous['started_at'])
+   with engine.connect() as c:checked=c.execute(select(closure_checks.c.version).where(closure_checks.c.ticket_id==t['id'])).scalar()
+   if checked==version or (previous and version and previous['checked_version']==version):
+    app.logger.info('Closure date already verified: request=%s',t['id'])
     continue
    try:
     def get_page(page):
      response=requests.get('https://api.smartsheet.com/2.0/sheets/'+cfg[1]+'/rows/'+t['row_id']+'/columns/'+str(cfg[2]['status'])+'/history',headers={'Authorization':'Bearer '+cfg[0]},params={'page':page,'pageSize':100},timeout=5)
      response.raise_for_status();return response.json()
-    history=warranty_dates.fetch_history(get_page);start=warranty_dates.closure_timestamp(history)
+    history=warranty_dates.fetch_history(get_page);start=warranty_dates.closure_timestamp(history) if warranty_dates.qualifies_warranty(status) else warranty_dates.closure_timestamp(history,warranty_dates.is_closed)
     if not start:
      details=[{'modifiedAt':entry.get('modifiedAt'),'statusCode':str(entry.get('value') or entry.get('displayValue') or '')[:3],'keys':sorted(entry.keys())} for entry in history.get('data',[])[:6]]
      app.logger.warning('Warranty history unresolved: request=%s count=%s total=%s entries=%s',t['id'],len(history.get('data',[])),history.get('totalCount'),json.dumps(details))
      continue
     with engine.begin() as c:
      values=dict(user_id=t['user_id'],started_at=start,checked_version=version)
-     if previous:c.execute(update(warranties).where(warranties.c.ticket_id==t['id']).values(**values))
-     else:c.execute(insert(warranties).values(ticket_id=t['id'],**values))
+     if warranty_dates.qualifies_warranty(status):
+      if previous:c.execute(update(warranties).where(warranties.c.ticket_id==t['id']).values(**values))
+      else:c.execute(insert(warranties).values(ticket_id=t['id'],**values))
+     if checked is None:c.execute(insert(closure_checks).values(ticket_id=t['id'],version=version))
+     else:c.execute(update(closure_checks).where(closure_checks.c.ticket_id==t['id']).values(version=version))
      actual=int(datetime.datetime.fromisoformat(start).timestamp())
      existing=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
      if existing is None:c.execute(insert(closures).values(ticket_id=t['id'],closed_at=actual))
@@ -353,6 +370,7 @@ def portal():
  cfg=snapshot['config'] if snapshot else None
  sheet_data=snapshot['sheet'] if snapshot else {}
  rows=sheet_data.get('rows',[])
+ if connected:intake_import.link(sys.modules[__name__],u,snapshot)
  with engine.begin() as c:
   ts=[dict(t) for t in c.execute(select(tickets).where(tickets.c.user_id==u['id']).order_by(tickets.c.created.desc())).mappings()]
   active=[]
@@ -385,6 +403,7 @@ def portal():
    if closed:
     closed_at=c.execute(select(closures.c.closed_at).where(closures.c.ticket_id==t['id'])).scalar()
     if closed_at is None:
+     if c.execute(select(imported_tickets.c.ticket_id).where(imported_tickets.c.ticket_id==t['id'])).scalar():continue
      closed_at=int(time.time())
      c.execute(insert(closures).values(ticket_id=t['id'],closed_at=closed_at))
     expires=warranty_dates.feedback_deadline(closed_at)
@@ -508,7 +527,7 @@ def refresh_ticket_numbers():
   pending=list(c.execute(select(tickets,ticket_details.c.job_number,request_numbers.c.reference,request_numbers.c.synced)
    .outerjoin(ticket_details,tickets.c.id==ticket_details.c.ticket_id)
    .outerjoin(request_numbers,tickets.c.id==request_numbers.c.ticket_id)
-   .where((request_numbers.c.ticket_id.is_(None)) | (request_numbers.c.synced==0))
+   .where(((request_numbers.c.ticket_id.is_(None)) | (request_numbers.c.synced==0)),~tickets.c.id.in_(select(imported_tickets.c.ticket_id)))
    .order_by(tickets.c.created,tickets.c.id)).mappings())
  sheet=None
  for item in pending:

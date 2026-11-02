@@ -12,7 +12,7 @@ def is_closed(value):
 def qualifies_warranty(value):
     return bool(re.match(r'^030(?=$|[\s–—-])',str(value or '').strip()))
 
-def closure_timestamp(history):
+def closure_timestamp(history, qualifies=qualifies_warranty):
     entries=history.get('data',[])
     if len(entries)<history.get('totalCount',len(entries)):return None
     dated=[]
@@ -27,11 +27,11 @@ def closure_timestamp(history):
             dated.append((dt,item.get('value') if item.get('value') is not None else item.get('displayValue')))
         except (KeyError,ValueError,TypeError,AttributeError,OverflowError,OSError):return None
     dated.sort(key=lambda x:x[0],reverse=True)
-    if not dated or not qualifies_warranty(dated[0][1]):return None
+    if not dated or not qualifies(dated[0][1]):return None
     # Use the start of the current 030 status period.
     start=dated[0][0]
     for dt,value in dated[1:]:
-        if not qualifies_warranty(value):break
+        if not qualifies(value):break
         start=dt
     return start.astimezone(datetime.timezone.utc).isoformat()
 

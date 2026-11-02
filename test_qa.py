@@ -36,7 +36,7 @@ class QaWorkflowTests(unittest.TestCase):
    checks=QaPdfTests()
    checks.assert_score(attachment,'Service technician','Meets')
    checks.assert_score(attachment,'Service department','Exceeds')
-  with care.engine.begin() as c:c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-259201))
+  with care.engine.begin() as c:c.execute(care.update(care.closures).where(care.closures.c.ticket_id==tid).values(closed_at=int(care.time.time())-345601))
   self.assertEqual(client.post('/api/portal',data=form,headers=headers).status_code,400)
 
  def test_documents_are_readonly(self):
