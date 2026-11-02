@@ -21,7 +21,7 @@ class ImportTests(unittest.TestCase):
  def test_existing_row_links_once_with_number_status_manager_and_no_staff_notes(self):
   for _ in range(2):
    data=self.portal();self.assertEqual(len(data['tickets']),1)
-   t=data['tickets'][0];self.assertEqual(t['reference'],'HOS-9184');self.assertEqual(t['status'],'020 - Contact Made');self.assertEqual(t['manager'],'02-Alec')
+   t=data['tickets'][0];self.assertEqual(t['reference'],'9184');self.assertEqual(t['status'],'020 - Contact Made');self.assertEqual(t['manager'],'02-Alec')
    self.assertNotIn('PRIVATE STAFF NOTES',str(data));self.assertEqual(t['created'],'2026-10-20T18:00:00+00:00')
   with a.engine.connect() as c:self.assertEqual(len(c.execute(a.select(a.tickets).where(a.tickets.c.row_id==str(self.rid))).all()),1)
  def test_separate_rows_keep_same_existing_customer_number(self):
@@ -36,7 +36,17 @@ class ImportTests(unittest.TestCase):
   # Changing the job number cannot break the email/row association.
   snapshot['sheet']['rows'][1]['cells']=[{**cell,'value':'12345'} if cell['columnId']==self.cols['ticket'] else cell for cell in first['cells']]
   result=self.portal(snapshot)['tickets']
-  self.assertEqual({t['reference'] for t in result},{'SOC-00002','HOS-12345'})
+  self.assertEqual({t['reference'] for t in result},{'SOC-00002','12345'})
+ def test_staff_reference_keeps_format_and_updates_existing_import(self):
+  for value in ['00712 / 00918','Staff-abc',9184,'hps-hos-custom',0]:
+   self.values['ticket']=value
+   self.assertEqual(self.portal(self.make_snapshot())['tickets'][0]['reference'],str(value))
+  snapshot=self.make_snapshot()
+  cell=next(c for c in snapshot['sheet']['rows'][0]['cells'] if c['columnId']==self.cols['ticket'])
+  cell.update(value=712,displayValue='00712')
+  self.assertEqual(self.portal(snapshot)['tickets'][0]['reference'],'00712')
+  self.values['ticket']=''
+  self.assertIsNone(self.portal(self.make_snapshot())['tickets'][0]['reference'])
  def test_unverified_account_cannot_claim_a_smartsheet_ticket(self):
   anonymous=a.app.test_client()
   cache=a.SheetSnapshot();cache.publish(self.snapshot)

@@ -1,11 +1,10 @@
 """Link staff-created intake rows to a verified account without copying staff notes."""
 import datetime, hashlib, re, threading
 from zoneinfo import ZoneInfo
-from sqlalchemy import select, insert, update
+from sqlalchemy import select, insert, update, delete
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.dialects.sqlite import insert as sqlite_insert
 import customer_database
-import ticket_numbers
 
 _lock=threading.Lock()
 _linked_versions={}
@@ -15,11 +14,9 @@ def cell_values(row,columns):
     return {key:(cells.get(str(cid),{}).get('value') if cells.get(str(cid),{}).get('value') is not None else cells.get(str(cid),{}).get('displayValue')) for key,cid in columns.items()}
 
 def reference(value):
-    text=str(value or '').strip()
-    if not text or text.casefold() in {'number pending','pending','n/a'}:return None
-    if re.fullmatch(r'(?:HPS-)?(?:HOS|SOC)-[A-Za-z0-9/.-]+',text,re.I):return text.upper()
-    if re.fullmatch(r'\d+(?:\.0)?(?:\s*/\s*\d+(?:\.0)?)*',text):return ticket_numbers.job_reference(re.split(r'\s*/\s*',text))
-    return text  # Preserve staff references; never invent a job number.
+    """Staff owns the reference on imported rows; website prefixes apply only to website submissions."""
+    text=str(value if value is not None else '').strip()
+    return text or None
 
 def created_at(row,values):
     raw=row.get('createdAt')
@@ -76,7 +73,8 @@ def link(a,user,snapshot):
                 counts['created']+=1
                 c.execute(insert(a.imported_tickets).values(ticket_id=tid,sheet_id=str(sheet_id)))
                 c.execute(insert(a.ticket_contacts).values(ticket_id=tid,first_name=str(values.get('first_name') or ''),last_name=str(values.get('last_name') or '')))
-            ref=reference(values.get('ticket'))
+            reference_cell=next((cell for cell in row.get('cells',[]) if str(cell['columnId'])==str(columns['ticket'])),{})
+            ref=reference(reference_cell.get('displayValue') if reference_cell.get('displayValue') is not None else values.get('ticket'))
             if ref:
                 soc=re.fullmatch(r'(?:HPS-)?SOC-(\d+)',ref)
                 if soc:
@@ -88,6 +86,8 @@ def link(a,user,snapshot):
                 saved=c.execute(select(a.request_numbers.c.ticket_id).where(a.request_numbers.c.ticket_id==tid)).scalar()
                 if saved:c.execute(update(a.request_numbers).where(a.request_numbers.c.ticket_id==tid).values(reference=ref,synced=1))
                 else:c.execute(insert(a.request_numbers).values(ticket_id=tid,reference=ref,synced=1))
+            else:
+                c.execute(delete(a.request_numbers).where(a.request_numbers.c.ticket_id==tid))
             manager_col=a.manager_column_id(sheet,columns)
             if manager_col is not None:
                 saved=c.execute(select(a.ticket_assignments.c.ticket_id).where(a.ticket_assignments.c.ticket_id==tid)).scalar()
