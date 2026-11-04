@@ -36,6 +36,14 @@ class PortalTests(unittest.TestCase):
    self.assertIn('attachment',self.a.get('/documents/'+name+'?download=1').headers['Content-Disposition'])
   self.assertEqual(self.a.get('/api/portal').status_code,401)
   self.assertEqual(self.a.get('/healthz').json['status'],'ok')
+ def test_security_response_headers(self):
+  with patch.dict(os.environ, {'RENDER':'true'}):
+   for path in ('/','/login'):
+    response=self.a.get(path)
+    self.assertIn(\"default-src 'self'\",response.headers['Content-Security-Policy-Report-Only'])
+    self.assertIn(\"frame-ancestors 'none'\",response.headers['Content-Security-Policy-Report-Only'])
+    self.assertEqual(response.headers['Strict-Transport-Security'],'max-age=86400')
+    self.assertEqual(response.headers['X-Frame-Options'],'DENY')
  def test_auth_csrf(self):
   self.assertEqual(self.a.post('/register',data={'name':'X','email':'x@test.invalid','password':'safe-test-password-123'}).status_code,403)
   self.assertEqual(self.a.post('/login',data={},headers={'Origin':'https://attacker.invalid'}).status_code,403)
