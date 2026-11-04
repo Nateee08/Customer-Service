@@ -83,6 +83,13 @@ def check_write():
 @app.after_request
 def headers(r):
  r.headers['X-Content-Type-Options']='nosniff';r.headers['Referrer-Policy']='same-origin';r.headers['X-Frame-Options']='DENY'
+ r.headers['Content-Security-Policy-Report-Only']=(\
+  "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; "\
+  "img-src 'self' data: blob:; font-src 'self' data:; connect-src 'self'; "\
+  "object-src 'none'; base-uri 'self'; frame-ancestors 'none'; form-action 'self'")
+ # Render terminates TLS before the app process. Browsers only honor HSTS on HTTPS responses.
+ if os.getenv('RENDER'):
+  r.headers['Strict-Transport-Security']='max-age=86400'
  if request.path=='/' or request.path.startswith(('/api','/login','/register','/staff','/forgot','/reset','/verify-account')):r.headers['Cache-Control']='no-store'
  return r
 @app.errorhandler(413)
