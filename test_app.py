@@ -40,8 +40,8 @@ class PortalTests(unittest.TestCase):
   with patch.dict(os.environ, {'RENDER':'true'}):
    for path in ('/','/login'):
     response=self.a.get(path)
-    self.assertIn(\"default-src 'self'\",response.headers['Content-Security-Policy-Report-Only'])
-    self.assertIn(\"frame-ancestors 'none'\",response.headers['Content-Security-Policy-Report-Only'])
+    self.assertIn("default-src 'self'",response.headers['Content-Security-Policy-Report-Only'])
+    self.assertIn("frame-ancestors 'none'",response.headers['Content-Security-Policy-Report-Only'])
     self.assertEqual(response.headers['Strict-Transport-Security'],'max-age=86400')
     self.assertEqual(response.headers['X-Frame-Options'],'DENY')
  def test_auth_csrf(self):
